@@ -1,0 +1,3 @@
+[{"cmd":"fill","args":{"selector":"#q","text":"batch-xb"}},
+ {"cmd":"select","args":{"selector":"#fruit","values":["banana"]}},
+ {"cmd":"click","args":{"selector":"#btn-log"}}]

@@ -1,0 +1,2 @@
+[{"cmd":"fill","args":{"selector":"#q","text":"partial-ok"}},
+ {"cmd":"click","args":{"selector":"#does-not-exist"}}]

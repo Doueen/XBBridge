@@ -80,5 +80,35 @@
 
 <div class="spacer"></div>
 <p id="bottom">页面底部</p>
+
+<section id="dragzone">
+  <h2>8. 拖拽 / 真实鼠标事件</h2>
+  <div id="pad" style="position:relative;width:260px;height:120px;border:1px solid #ccc;background:#fafafa">
+    <div id="knob" style="position:absolute;left:8px;top:8px;width:26px;height:26px;border-radius:50%;background:#2a9d8f;cursor:grab"></div>
+  </div>
+  <p>knob: <span id="knobout">8,8</span> · clicks: <span id="clickout">0</span></p>
+  <script>
+    (function () {
+      const knob = document.getElementById('knob');
+      const out = document.getElementById('knobout');
+      let dragging = false;
+      knob.addEventListener('pointerdown', (e) => { dragging = true; knob.setPointerCapture(e.pointerId); });
+      knob.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        const pad = document.getElementById('pad').getBoundingClientRect();
+        const x = Math.round(e.clientX - pad.left - 13);
+        const y = Math.round(e.clientY - pad.top - 13);
+        knob.style.left = x + 'px';
+        knob.style.top = y + 'px';
+        out.textContent = x + ',' + y;
+      });
+      knob.addEventListener('pointerup', () => { dragging = false; });
+      document.getElementById('pad').addEventListener('click', () => {
+        const el = document.getElementById('clickout');
+        el.textContent = String(Number(el.textContent) + 1);
+      });
+    })();
+  </script>
+</section>
 </body>
 </html>

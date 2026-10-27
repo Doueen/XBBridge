@@ -56,15 +56,19 @@ class BridgeError(RuntimeError):
     """Failure carrying the same contract the extension uses."""
 
     def __init__(self, message: str, code: str = "unavailable",
-                 outcome: str = "not_started", retryable: bool = False):
+                 outcome: str = "not_started", retryable: bool = False, details=None):
         super().__init__(message)
         self.code = code
         self.outcome = outcome
         self.retryable = retryable
+        self.details = details
 
     def payload(self) -> dict:
-        return {"code": self.code, "message": str(self), "outcome": self.outcome,
-                "retryable": self.retryable}
+        out = {"code": self.code, "message": str(self), "outcome": self.outcome,
+               "retryable": self.retryable}
+        if self.details is not None:
+            out["details"] = self.details
+        return out
 
 
 def _fail_pending(reason: str, code: str) -> None:
@@ -110,7 +114,8 @@ def call(cmd: str, args: dict | None = None, timeout: float = 30.0):
             raise BridgeError(err.get("message") or f"{cmd} failed",
                               code=err.get("code") or "command_failed",
                               outcome=err.get("outcome") or "unknown",
-                              retryable=bool(err.get("retryable")))
+                              retryable=bool(err.get("retryable")),
+                              details=err.get("details"))
         raise BridgeError(str(err or f"{cmd} failed"), code="command_failed",
                           outcome="unknown")
     return msg.get("result")

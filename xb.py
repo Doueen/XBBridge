@@ -35,7 +35,7 @@ EXIT_BY_CODE = {
     "no_target_tab": 3, "extension_unavailable": 3, "unavailable": 3, "bridge_unavailable": 3,
     "timeout": 4,
     "target_not_found": 5, "restricted_page": 5,
-    "stale_generation": 6, "tab_not_owned": 6, "claim_required": 6,
+    "stale_generation": 6, "tab_not_owned": 6, "claim_required": 6, "batch_failed": 6,
     "debugger_conflict": 7,
 }
 
@@ -44,12 +44,13 @@ class XbFailure(RuntimeError):
     """A failed command with the extension's error contract attached."""
 
     def __init__(self, code: str, message: str, outcome: str = "unknown",
-                 retryable: bool = False, cmd: str = ""):
+                 retryable: bool = False, cmd: str = "", details=None):
         super().__init__(message)
         self.code = code
         self.outcome = outcome
         self.retryable = retryable
         self.cmd = cmd
+        self.details = details
 
     @property
     def exit_code(self) -> int:
@@ -57,11 +58,11 @@ class XbFailure(RuntimeError):
 
     def render(self) -> None:
         if JSON_MODE:
-            print(json.dumps({"ok": False, "cmd": self.cmd,
-                              "error": {"code": self.code, "message": str(self),
-                                        "outcome": self.outcome,
-                                        "retryable": self.retryable}},
-                             ensure_ascii=False))
+            err = {"code": self.code, "message": str(self),
+                   "outcome": self.outcome, "retryable": self.retryable}
+            if getattr(self, "details", None) is not None:
+                err["details"] = self.details
+            print(json.dumps({"ok": False, "cmd": self.cmd, "error": err}, ensure_ascii=False))
             return
         bits = [f"xb: {self.cmd + ' failed — ' if self.cmd else ''}{self}"]
         meta = [self.code]
@@ -127,7 +128,8 @@ def rpc(cmd: str, args: dict | None = None, timeout: float = 60.0):
             raise XbFailure(err.get("code") or "command_failed",
                             err.get("message") or f"{cmd} failed",
                             outcome=err.get("outcome") or "unknown",
-                            retryable=bool(err.get("retryable")), cmd=cmd)
+                            retryable=bool(err.get("retryable")), cmd=cmd,
+                            details=err.get("details"))
         raise XbFailure("command_failed", str(err or body or f"{cmd} failed"), cmd=cmd)
     except urllib.error.URLError as e:
         raise XbFailure("bridge_unavailable", f"bridge unreachable ({e})",
@@ -138,7 +140,8 @@ def rpc(cmd: str, args: dict | None = None, timeout: float = 60.0):
             raise XbFailure(err.get("code") or "command_failed",
                             err.get("message") or f"{cmd} failed",
                             outcome=err.get("outcome") or "unknown",
-                            retryable=bool(err.get("retryable")), cmd=cmd)
+                            retryable=bool(err.get("retryable")), cmd=cmd,
+                            details=err.get("details"))
         raise XbFailure("command_failed", str(err or f"{cmd} failed"), cmd=cmd)
     return res.get("result")
 
@@ -257,6 +260,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("tab-select", help="activate a tab")
     s.add_argument("tab_id", type=int); s.add_argument("--no-focus", action="store_true")
     sub.add_parser("windows")
+    wr = sub.add_parser("window-resize", help="resize/move/unminimise a browser window")
+    wr.add_argument("--window", type=int); wr.add_argument("--width", type=int); wr.add_argument("--height", type=int)
+    wr.add_argument("--left", type=int); wr.add_argument("--top", type=int)
+    wr.add_argument("--state", choices=["normal", "minimized", "maximized", "fullscreen"])
     sl = sub.add_parser("sleep", help="discard tabs (≈ Edge sleeping tabs)"); sl.add_argument("tab_ids")
     sp = sub.add_parser("split", help="split view: two tabs side by side")
     sp.add_argument("tab_id", type=int); sp.add_argument("other_tab_id", type=int)
@@ -295,6 +302,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # interaction
     ck = sub.add_parser("click", parents=[tgt])
+    ck.add_argument("--trusted", action="store_true", help="dispatch real CDP mouse events at the element centre")
+    ck.add_argument("--double", action="store_true", help="double click")
     fl = sub.add_parser("fill", parents=[tgt]); fl.add_argument("text", nargs="?", default="")
     hv = sub.add_parser("hover", parents=[tgt])
     st = sub.add_parser("scroll-to", parents=[tgt])
@@ -309,6 +318,19 @@ def build_parser() -> argparse.ArgumentParser:
     wh.add_argument("--ref"); wh.add_argument("--selector"); wh.add_argument("--tab", type=int)
     up = sub.add_parser("upload"); up.add_argument("target"); up.add_argument("--files", required=True)
     up.add_argument("--tab", type=int)
+    dr = sub.add_parser("drag", help="drag from one point/element to another with real CDP events")
+    dr.add_argument("from_", metavar="from", help="\"x,y\", a CSS selector or @eN")
+    dr.add_argument("to", help="\"x,y\", a CSS selector or @eN")
+    dr.add_argument("--tab", type=int)
+    dr.add_argument("--steps", type=int, default=12)
+    dr.add_argument("--duration", type=float, default=320, help="total drag time in ms")
+    dr.add_argument("--no-mark", action="store_true", dest="no_mark")
+    dr.add_argument("--mark-label", dest="mark_label")
+    ba = sub.add_parser("batch", help="run a JSON array of {cmd,args} steps in one round trip")
+    ba.add_argument("--file", help="read steps from this file (default: stdin)")
+    ba.add_argument("--tab", type=int, help="default tabId for steps that omit one")
+    ba.add_argument("--interval-ms", type=int, default=0, dest="interval_ms")
+    ba.add_argument("--continue-on-error", action="store_true", dest="continue_on_error")
     dl = sub.add_parser("download"); dl.add_argument("target", nargs="?"); dl.add_argument("--url")
     dl.add_argument("--dir", required=True); dl.add_argument("--tab", type=int); dl.add_argument("--timeout", type=float, default=30)
 
@@ -427,6 +449,17 @@ def main(argv=None) -> int:
         emit(rpc("window.list", {}), j, lambda ws_: [print(
             f"{w['id']:>4}  {'focused' if w['focused'] else '       '}  {w['tabs']:>3} tab(s)  {w['title'][:60]}")
             for w in ws_])
+    elif args.cmd == "window-resize":
+        wid = args.window
+        if wid is None:
+            tabs = rpc("tab.list", {})
+            active = next((t for t in tabs if t.get("active")), tabs[0] if tabs else None)
+            if not active:
+                raise XbFailure("no_target_tab", "no tab to infer the window from", cmd="window-resize")
+            wid = active["windowId"]
+        emit(rpc("window.resize", {"windowId": wid, "width": args.width, "height": args.height,
+                                   "left": args.left, "top": args.top, "state": args.state}), j,
+             lambda r: print(f"window {r['id']} -> {r.get('width')}x{r.get('height')} ({r.get('state')})"))
     elif args.cmd == "open":
         ai = {"url": args.url, "active": not args.background}
         if args.group_title or args.color:
@@ -537,7 +570,9 @@ def main(argv=None) -> int:
         ai = {"tabId": tab, "ref": args.target if (args.target or "").startswith("@") else None,
               "selector": None if (args.target or "").startswith("@") else args.target,
               "noMark": True if getattr(args, "no_mark", False) else None,
-              "markLabel": getattr(args, "mark_label", None)}
+              "markLabel": getattr(args, "mark_label", None),
+              "trusted": True if getattr(args, "trusted", False) else None,
+              "double": True if getattr(args, "double", False) else None}
         emit(rpc(args.cmd, ai), j, lambda r: print(f"{args.cmd}: " + json.dumps(
             {k: v for k, v in r.items() if k != "tabId"}, ensure_ascii=False)))
     elif args.cmd == "fill":
@@ -568,6 +603,37 @@ def main(argv=None) -> int:
                             "selector": None if args.target.startswith("@") else args.target,
                             "files": [os.path.abspath(f) for f in csv_list(args.files)]}), j,
              lambda r: print(f"uploaded {r['files']} into {r['selector']}"))
+    elif args.cmd == "drag":
+        emit(rpc("drag", {"tabId": tab, "from": args.from_, "to": args.to,
+                          "steps": args.steps, "durationMs": args.duration,
+                          "noMark": True if args.no_mark else None,
+                          "markLabel": args.mark_label}, timeout=120), j,
+             lambda r: print(f"dragged {r['from']['x']},{r['from']['y']} -> "
+                             f"{r['to']['x']},{r['to']['y']} in {r['steps']} steps"))
+    elif args.cmd == "batch":
+        try:
+            raw = open(args.file, encoding="utf-8").read() if args.file else sys.stdin.read()
+        except OSError as exc:
+            raise XbFailure("invalid_params", f"cannot read steps: {exc}", cmd="batch")
+        try:
+            steps = json.loads(raw)
+        except Exception as exc:
+            raise XbFailure("invalid_params", f"steps are not valid JSON: {exc}", cmd="batch")
+        if isinstance(steps, dict) and "steps" in steps:
+            steps = steps["steps"]
+        r = rpc("batch", {"tabId": tab, "steps": steps, "intervalMs": args.interval_ms or None,
+                          "stopOnError": False if args.continue_on_error else None},
+                timeout=300)
+        if j:
+            print(json.dumps(r, ensure_ascii=False, indent=2))
+        else:
+            for row in r.get("results", []):
+                if row.get("ok"):
+                    print(f"  ok   [{row['index']}] {row['cmd']}")
+                else:
+                    err = row.get("error") or {}
+                    print(f"  FAIL [{row['index']}] {row['cmd']}: {err.get('code')} {err.get('message')}")
+            print(f"{r.get('applied')}/{r.get('steps')} step(s) applied")
     elif args.cmd == "download":
         do_download(args)
 

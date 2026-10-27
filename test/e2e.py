@@ -43,10 +43,41 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     print(("  PASS  " if cond else "  FAIL  ") + name + (f"   [{detail}]" if detail else ""))
 
 
+def xb_error(*argv):
+    """Run a command expected to fail; return (exit code, error envelope)."""
+    rc, out = xb(*argv, expect_fail=True)
+    payload = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                payload = json.loads(line)
+            except Exception:
+                pass
+    return rc, payload.get("error") or {}
+
+
+def window_sane() -> None:
+    """An offscreen (-10000) window degenerates to a 0x0 viewport on Edge 155.
+
+    Every rect-based command then fails for reasons unrelated to the bridge, so
+    heal the test window before asserting anything.
+    """
+    tabs = xb("tabs")
+    if not tabs:
+        return
+    tab = tabs[0]["id"]
+    w = xb("eval", "innerWidth", "--tab", tab)["value"]
+    if not w:
+        xb("window-resize", "--width", 1200, "--height", 800, "--left", 120, "--top", 80, "--state", "normal")
+        xb("wait-ms", 300)
+
+
 def main() -> int:
     print("== status ==")
     st = xb("status")
     check("extension connected", st["extension"]["connected"], f"v{st['extension'].get('version')}")
+    window_sane()
 
     print("== navigation + waits ==")
     tab = xb("open", f"{SITE}/app.html")["id"]
@@ -174,6 +205,94 @@ def main() -> int:
     time.sleep(0.6)
     rec = xb("recent", "--limit", 5)
     check("recent sees the closed tab", len(rec) >= 1, f"{len(rec)} entries")
+
+    print("== error contract ==")
+    rc, err = xb_error("click", "#nothing-like-this")
+    check("missing element -> code target_not_found + exit 5",
+          rc == 5 and err.get("code") == "target_not_found", f"rc={rc} {err.get('code')}")
+    check("failed click reports not_started", err.get("outcome") == "not_started", str(err.get("outcome")))
+    bad_tab = xb("open", "edge://settings")["id"]
+    rc, err = xb_error("text", "--tab", bad_tab)
+    check("restricted page -> code restricted_page",
+          rc == 5 and err.get("code") == "restricted_page", f"rc={rc} {err.get('code')}")
+    xb("close", bad_tab)
+
+    print("== control marker ==")
+    xb("mark", "--tab", tab, "--label", "e2e marker")
+    label = xb("eval", "(document.getElementById('xb-mark-root')||{}).getAttribute"
+                       "&&document.getElementById('xb-mark-root').getAttribute('data-xb-label')", "--tab", tab)["value"]
+    check("mark paints an overlay with its label", label == "e2e marker", str(label))
+    fav = xb("eval", "!!document.getElementById('xb-favicon-link')", "--tab", tab)["value"]
+    check("mark tints the favicon", fav is True, str(fav))
+    xb("unmark", "--tab", tab)
+    gone = xb("eval", "!!document.getElementById('xb-mark-root')", "--tab", tab)["value"]
+    check("unmark removes the overlay", gone is False, str(gone))
+    xb("click", "#btn-log", "--tab", tab)
+    auto = xb("eval", "!!document.getElementById('xb-mark-root')", "--tab", tab)["value"]
+    check("acting on a tab marks it automatically", auto is True, str(auto))
+    xb("unmark", "--all")
+
+    print("== drag / trusted click ==")
+    knob_before = xb("eval", "document.getElementById('knobout').textContent", "--tab", tab)["value"]
+    dr = xb("drag", "#knob", "300,300", "--tab", tab, "--steps", 8, "--duration", 200)
+    knob_after = xb("eval", "document.getElementById('knobout').textContent", "--tab", tab)["value"]
+    check("drag moves a pointer-driven element", knob_after != knob_before, f"{knob_before} -> {knob_after}")
+    check("drag verifies it started on the element", dr.get("fromHit") is True, str(dr.get("at")))
+    clicks_before = int(xb("eval", "document.getElementById('clickout').textContent", "--tab", tab)["value"])
+    xb("click", "#pad", "--trusted", "--tab", tab, "--no-mark")
+    clicks_after = int(xb("eval", "document.getElementById('clickout').textContent", "--tab", tab)["value"])
+    check("trusted click fires a real click", clicks_after == clicks_before + 1, f"{clicks_before} -> {clicks_after}")
+
+    print("== batch ==")
+    steps = os.path.join(HERE, "steps-e2e.json")
+    with open(steps, "w", encoding="utf-8") as f:
+        json.dump([{"cmd": "fill", "args": {"selector": "#q", "text": "batch-e2e"}},
+                   {"cmd": "select", "args": {"selector": "#fruit", "values": ["cherry"]}}], f)
+    br = xb("batch", "--file", steps, "--tab", tab)
+    val = xb("eval", "JSON.stringify([document.getElementById('q').value, "
+                      "document.getElementById('selout').textContent])", "--tab", tab)["value"]
+    check("batch applies every step in one trip", br["applied"] == 2 and "batch-e2e" in val, val)
+    with open(steps, "w", encoding="utf-8") as f:
+        json.dump([{"cmd": "fill", "args": {"selector": "#q", "text": "partial"}},
+                   {"cmd": "click", "args": {"selector": "#nope-batch"}}], f)
+    rc, err = xb_error("batch", "--file", steps, "--tab", tab)
+    check("a failed batch reports outcome=applied (no blind retry)",
+          rc == 6 and err.get("outcome") == "applied" and len(err.get("details", {}).get("results", [])) == 2,
+          f"rc={rc} outcome={err.get('outcome')}")
+    os.remove(steps)
+
+    print("== capture geometry ==")
+    vp = xb("eval", "JSON.stringify([innerWidth, innerHeight, "
+                    "document.documentElement.scrollHeight])", "--tab", tab)["value"]
+    iw, ih, doc_h = json.loads(vp)
+    shot = xb("screenshot", os.path.join(HERE, "shot-vp.png"), "--tab", tab)
+    check("viewport capture matches the viewport",
+          abs(shot["width"] - iw) <= 20 and abs(shot["height"] - ih) <= 20,
+          f"{shot['width']}x{shot['height']} vs {iw}x{ih}")
+    full = xb("screenshot", os.path.join(HERE, "shot-full.png"), "--tab", tab, "--full")
+    check("full-page capture is taller than the viewport and capped at scale-to",
+          full["height"] > ih and max(full["width"], full["height"]) <= 2000,
+          f"{full['width']}x{full['height']} css={full['css']}")
+    clip = xb("screenshot", os.path.join(HERE, "shot-clip.png"), "--tab", tab, "--clip", "0,0,200,120")
+    check("clip capture has exactly the requested size",
+          (clip["width"], clip["height"]) == (200, 120), f"{clip['width']}x{clip['height']}")
+    el = xb("screenshot", os.path.join(HERE, "shot-el.png"), "--tab", tab, "--selector", "#tbl")
+    box = json.loads(xb("eval", "JSON.stringify((()=>{const r=document.getElementById('tbl')"
+                                 ".getBoundingClientRect();return [Math.round(r.width),Math.round(r.height)]})())",
+                        "--tab", tab)["value"])
+    check("element capture is the element box", abs(el["width"] - box[0]) <= 4 and abs(el["height"] - box[1]) <= 4,
+          f"{el['width']}x{el['height']} vs {box}")
+    active_before = next(t["id"] for t in xb("tabs") if t["active"])
+    bg = xb("open", f"{SITE}/beta.html", "--background")["id"]
+    xb("screenshot", os.path.join(HERE, "shot-bg.png"), "--tab", bg)
+    active_after = next(t["id"] for t in xb("tabs") if t["active"])
+    check("capturing a background tab does not steal focus", active_before == active_after,
+          f"active {active_before} -> {active_after}")
+    xb("close", bg)
+    for f in ("shot-vp.png", "shot-full.png", "shot-clip.png", "shot-el.png", "shot-bg.png"):
+        p = os.path.join(HERE, f)
+        if os.path.exists(p):
+            os.remove(p)
 
     print("== teardown ==")
     keeper = xb("open", f"{SITE}/gamma.html")["id"]

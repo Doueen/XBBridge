@@ -38,6 +38,7 @@ class XbError extends Error {
     this.code = code;
     this.outcome = o.outcome || 'not_started';
     this.retryable = !!o.retryable;
+    this.details = o.details;
   }
 }
 
@@ -63,7 +64,9 @@ function classifyError(message) {
 
 function errorPayload(e) {
   if (e instanceof XbError) {
-    return { code: e.code, message: e.message, outcome: e.outcome, retryable: e.retryable };
+    const out = { code: e.code, message: e.message, outcome: e.outcome, retryable: e.retryable };
+    if (e.details !== undefined) out.details = e.details;
+    return out;
   }
   const message = (e && e.message) ? e.message : String(e);
   const code = classifyError(message);
@@ -542,6 +545,22 @@ function _fPageBox(sel) {
 
 function _fCenter() { return { x: Math.round(window.innerWidth / 2), y: Math.round(window.innerHeight / 2) }; }
 
+/* Scroll to the element, then report where it really is and whether a real
+ * mouse event at that point would actually land on it. */
+function _fTrustedBox(sel) {
+  const el = document.querySelector(sel);
+  if (!el) return { error: 'element not found: ' + sel };
+  el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+  const r = el.getBoundingClientRect();
+  const x = Math.round(r.left + r.width / 2);
+  const y = Math.round(r.top + r.height / 2);
+  const at = document.elementFromPoint(x, y);
+  const hit = !!at && (at === el || el.contains(at) || at.contains(el));
+  return { x, y, w: Math.round(r.width), h: Math.round(r.height), hit,
+           at: at ? (at.tagName.toLowerCase() + (at.id ? '#' + at.id : '')) : null,
+           scrollY: Math.round(window.scrollY) };
+}
+
 function _fHelpOverlay(message, id) {
   const host = document.createElement('div');
   host.attachShadow({ mode: 'open' });
@@ -789,6 +808,35 @@ async function markTab(tab, a) {
   const m = await ensureMark(tab.id, a && a.markLabel).catch(() => null);
   return !!m;
 }
+
+/* Resolve "x,y", a CSS selector, or @eN into viewport coordinates. */
+async function resolvePoint(tabId, spec) {
+  if (spec === undefined || spec === null || spec === '') {
+    throw fail('invalid_params', 'point required: "x,y", a CSS selector or @eN');
+  }
+  if (typeof spec === 'object') {
+    const x = Number(spec.x), y = Number(spec.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) throw fail('invalid_params', 'point needs numeric x and y');
+    return { x, y, via: 'object' };
+  }
+  const text = String(spec).trim();
+  const m = /^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/.exec(text);
+  if (m) return { x: Number(m[1]), y: Number(m[2]), via: 'coords' };
+  const ref = parseRef(text);
+  const selector = ref ? refSelector(ref.i) : text;
+  const box = await inject(tabId, _fBox, [selector], ref ? ref.frameId : 0);
+  if (box && box.error) throw fail('target_not_found', box.error);
+  return { x: box.x, y: box.y, w: box.w, h: box.h, via: 'element' };
+}
+
+/** Real input needs the page to believe it is focused: an offscreen/background
+ *  window otherwise drops mousePressed/Released while keeping mouseMoved. */
+async function focusEmulation(t) {
+  try { await chrome.debugger.sendCommand(t, 'Emulation.setFocusEmulationEnabled', { enabled: true }); }
+  catch (e) { /* older builds: real clicks then need a focused window */ }
+}
+
+const mousePoint = (p) => ({ x: Math.round(p.x), y: Math.round(p.y) });
 
 setInterval(() => {
   const now = Date.now();
@@ -1158,9 +1206,73 @@ const COMMANDS = {
     const tab = await getTab(a.tabId);
     if (a.flash !== false) await pulseAt(tab.id, selector, ref ? ref.frameId : 0);
     const marked = a.noMark === true ? null : await ensureMark(tab.id, a.markLabel).catch(() => null);
+    if (a.trusted === true) {
+      // real CDP mouse events: needed by canvas widgets and elements that only
+      // react to trusted input. Verify the hit before firing — a stale scroll
+      // position would otherwise click whatever happens to sit at those pixels.
+      const box = await inject(tab.id, _fTrustedBox, [selector], ref ? ref.frameId : 0);
+      if (box.error) throw fail('target_not_found', box.error);
+      if (!box.hit) {
+        const out2 = await inject(tab.id, _fClickSel, [selector], ref ? ref.frameId : 0);
+        if (out2.error) throw fail('target_not_found', out2.error);
+        return { tabId: tab.id, ...out2, marked: !!marked,
+                 trusted: { requested: true, fellBack: true, at: box.at } };
+      }
+      const count = a.double === true ? 2 : 1;
+      await withDebugger(tab.id, async (t) => {
+        await focusEmulation(t);
+        const at = mousePoint(box);
+        await chrome.debugger.sendCommand(t, 'Input.dispatchMouseEvent',
+          { type: 'mouseMoved', ...at, button: 'none', buttons: 0, clickCount: 0 });
+        for (let n = 1; n <= count; n += 1) {
+          await chrome.debugger.sendCommand(t, 'Input.dispatchMouseEvent',
+            { type: 'mousePressed', ...at, button: 'left', buttons: 1, clickCount: n });
+          await sleep(16);
+          await chrome.debugger.sendCommand(t, 'Input.dispatchMouseEvent',
+            { type: 'mouseReleased', ...at, button: 'left', buttons: 0, clickCount: n });
+        }
+      });
+      return { tabId: tab.id, clicked: { via: 'cdp', x: box.x, y: box.y, clicks: count }, marked: !!marked };
+    }
     const out = await inject(tab.id, _fClickSel, [selector], ref ? ref.frameId : 0);
     if (out.error) throw new Error(out.error);
     return { tabId: tab.id, ...out, marked: !!marked };
+  },
+
+  async drag(a) {
+    const tab = await getTab(a.tabId);
+    let from;
+    if (typeof a.from === 'string' && !/^\s*-?\d+(?:\.\d+)?\s*,/.test(a.from)) {
+      const ref = parseRef(a.from);
+      const sel = ref ? refSelector(ref.i) : a.from;
+      from = await inject(tab.id, _fTrustedBox, [sel], ref ? ref.frameId : 0);
+      if (from.error) throw fail('target_not_found', from.error);
+    } else {
+      from = await resolvePoint(tab.id, a.from);
+    }
+    const to = await resolvePoint(tab.id, a.to);
+    const steps = Math.max(2, Math.min(120, Number(a.steps === undefined ? 12 : a.steps)));
+    const durationMs = Math.max(30, Math.min(5000, Number(a.durationMs === undefined ? 320 : a.durationMs)));
+    if (a.flash !== false) {
+      await inject(tab.id, _fPulse, [{ x: from.x, y: from.y, w: from.w, h: from.h }]).catch(() => {});
+    }
+    const marked = await markTab(tab, a);
+    const start = mousePoint(from), end = mousePoint(to);
+    await withDebugger(tab.id, async (t) => {
+      await focusEmulation(t);
+      const send = (type, p, extra) => chrome.debugger.sendCommand(t, 'Input.dispatchMouseEvent', { type, ...p, ...extra });
+      await send('mouseMoved', start, { button: 'none', buttons: 0, clickCount: 0 });
+      await send('mousePressed', start, { button: 'left', buttons: 1, clickCount: 1 });
+      for (let i = 1; i <= steps; i += 1) {
+        const k = i / steps;
+        const p = { x: Math.round(start.x + (end.x - start.x) * k), y: Math.round(start.y + (end.y - start.y) * k) };
+        await send('mouseMoved', p, { button: 'left', buttons: 1 });
+        await sleep(Math.max(4, durationMs / steps));
+      }
+      await send('mouseReleased', end, { button: 'left', buttons: 0, clickCount: 1 });
+    });
+    return { tabId: tab.id, dragged: true, from: start, to: end, steps, durationMs,
+             fromHit: from.hit, at: from.at, marked };
   },
 
   async fill(a) {
@@ -1533,6 +1645,50 @@ const COMMANDS = {
     return { tabId: tab.id, pulsed: true, x, y };
   },
 
+  /*
+   * Run several commands in one round trip. Partial application is reported
+   * honestly: outcome=applied means earlier steps already changed the page, so
+   * a blind retry of the whole batch would duplicate them.
+   */
+  async batch(a) {
+    const steps = Array.isArray(a.steps) ? a.steps : [];
+    if (!steps.length) throw fail('invalid_params', 'steps must be a non-empty array');
+    if (steps.length > 100) throw fail('invalid_params', 'at most 100 steps per batch');
+    const results = [];
+    const applied = () => results.some((r) => r.ok);
+    for (let i = 0; i < steps.length; i += 1) {
+      const step = steps[i] || {};
+      const cmd = String(step.cmd || '');
+      const fn = COMMANDS[cmd];
+      if (!fn || cmd === 'batch') {
+        const error = { code: 'unsupported_method', message: `step ${i}: unsupported command ${cmd}`,
+                        outcome: 'not_started', retryable: false };
+        results.push({ index: i, cmd, ok: false, error });
+        if (a.stopOnError !== false) {
+          throw fail('batch_failed', `step ${i} (${cmd}) is not a runnable command`,
+                     { outcome: applied() ? 'applied' : 'not_started', details: { results } });
+        }
+        continue;
+      }
+      try {
+        const args = Object.assign({}, step.args || {});
+        if (args.tabId === undefined && a.tabId !== undefined) args.tabId = a.tabId;
+        const result = await fn(args);
+        results.push({ index: i, cmd, ok: true, result });
+      } catch (e) {
+        const error = errorPayload(e);
+        results.push({ index: i, cmd, ok: false, error });
+        if (a.stopOnError !== false) {
+          throw fail('batch_failed', `step ${i} (${cmd}) failed: ${error.message}`,
+                     { outcome: applied() ? 'applied' : 'not_started', retryable: false,
+                       details: { results } });
+        }
+      }
+      if (a.intervalMs) await sleep(Number(a.intervalMs));
+    }
+    return { steps: steps.length, applied: results.filter((r) => r.ok).length, results };
+  },
+
   /* ---- Chromium/Edge extras ---- */
 
   async 'tab.sleep'(a) {
@@ -1844,7 +2000,6 @@ const COMMANDS = {
     const maxDim = a.maxDimension === undefined ? 2000 : Math.max(100, Number(a.maxDimension));
     const full = a.full === true;
     let clip = null;
-
     try {
       const metrics = await withDebugger(tab.id, (t) => chrome.debugger.sendCommand(t, 'Page.getLayoutMetrics', {}));
       const viewport = metrics.cssVisualViewport || metrics.visualViewport || {};
@@ -1889,11 +2044,19 @@ const COMMANDS = {
       const params = {
         format: fmt,
         clip: captureClip,
-        captureBeyondViewport: !!clip || full
+        // a hidden/background tab produces no compositor frame on demand; asking
+        // for the area beyond the viewport makes the renderer paint it offscreen
+        // instead of waiting forever for a frame that will never arrive
+        captureBeyondViewport: !!clip || full || tab.active === false
       };
       if (fmt === 'jpeg') params.quality = a.quality === undefined ? 80 : Math.max(1, Math.min(100, Number(a.quality)));
 
-      const res = await withDebugger(tab.id, (t) => chrome.debugger.sendCommand(t, 'Page.captureScreenshot', params));
+      const res = await withDebugger(tab.id, (t) => Promise.race([
+        chrome.debugger.sendCommand(t, 'Page.captureScreenshot', params),
+        sleep(Number(a.timeoutMs || 20000)).then(() => {
+          throw fail('timeout', 'the page produced no frame for capture in time', { retryable: true });
+        })
+      ]));
       if (!res || !res.data) throw fail('capture_failed', 'the page produced no screenshot data');
       return {
         tabId: tab.id, via: 'cdp', format: fmt, base64: res.data,
@@ -1903,10 +2066,11 @@ const COMMANDS = {
         full: full || undefined, clip: clip || undefined
       };
     } catch (e) {
-      if (a.fallback === false || !(e instanceof Error) || e.code) throw e;
+      if (a.fallback === false || !(e instanceof Error)) throw e;
       // captureVisibleTab needs the tab to be front-most. Doing that silently is
       // exactly the "the agent yanked my tab" complaint, so it is opt-in only.
       if (a.foreground !== true) {
+        if (e.code) throw e;
         throw fail('capture_unavailable',
           'CDP capture failed and the fallback would need to bring this tab to the front; '
           + 'pass foreground=true to allow that', { retryable: true });
