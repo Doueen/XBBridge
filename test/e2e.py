@@ -355,6 +355,46 @@ def main() -> int:
     code, body = raw_rpc("click", {"tabId": tab, "selector": "#q"})
     check("release frees the tab again", code == 200, f"http {code}")
 
+    print("== misc commands ==")
+    txt = xb("text", "--tab", tab)["text"]
+    check("text returns page text", "xb 全功能测试台" in txt, f"{len(txt)} chars")
+    html = xb("get-html", "#tbl", "--tab", tab)["html"]
+    check("get-html returns the element markup", "<table" in html.lower(), f"{len(html)} chars")
+    xb("focus", "#q", "--tab", tab)
+    focused = xb("eval", "document.activeElement.id", "--tab", tab)["value"]
+    xb("blur", "#q", "--tab", tab)
+    blurred = xb("eval", "document.activeElement.id", "--tab", tab)["value"]
+    check("focus/blur move the active element", focused == "q" and blurred != "q", f"{focused} -> {blurred}")
+    z = xb("zoom", tab, "1.25")
+    xb("zoom", tab, "1")
+    check("zoom applies a factor", abs(z["zoom"] - 1.25) < 0.01, str(z["zoom"]))
+    xb("navigate", f"{SITE}/beta.html", "--tab", tab)
+    back = xb("navigate-back", "--tab", tab)
+    check("navigate-back returns to the previous page", "app.html" in back["url"], back["url"].rsplit("/", 1)[-1])
+    fwd = xb("navigate-forward", "--tab", tab)
+    check("navigate-forward goes back again", fwd.get("dir") == "forward", str(fwd.get("via")))
+    rl = xb("reload", "--tab", tab)
+    check("reload reports the tab", rl["reloaded"] == tab, str(rl["reloaded"]))
+    xb("navigate", f"{SITE}/app.html", "--tab", tab)
+    marks = xb("marks")
+    check("marks lists the registry", isinstance(marks.get("marks"), list), f"{marks.get('count')} mark(s)")
+    leases = xb("leases")
+    check("leases lists active claims", isinstance(leases, list), f"{len(leases)} lease(s)")
+    alias = xb("shot", os.path.join(HERE, "shot-alias.png"), "--tab", tab)
+    ok_alias = os.path.exists(os.path.join(HERE, "shot-alias.png")) and alias["bytes"] > 1000
+    if ok_alias:
+        os.remove(os.path.join(HERE, "shot-alias.png"))
+    check("shot is an alias of screenshot", ok_alias, f"{alias['bytes']}B")
+    pu = xb("pulse", "--selector", "#q", "--tab", tab)
+    check("pulse resolves an element to a point", pu["pulsed"] is True and pu["x"] > 0, f"{pu['x']},{pu['y']}")
+    doc = xb("doctor")
+    check("doctor reports capabilities", doc.get("version") and "features" in doc, str(doc.get("version")))
+    ap = xb("apis")
+    check("apis reports namespaces", isinstance(ap.get("namespaces"), dict), f"{len(ap.get('namespaces') or {})} ns")
+    logs = xb("logs", "-n", "3", want_json=False)
+    check("logs prints the daemon log", "bridge up" in logs or "extension" in logs, logs.splitlines()[-1][:40] if logs else "")
+    xb("unmark", "--all")
+
     print("== teardown ==")
     keeper = xb("open", f"{SITE}/gamma.html")["id"]
     xb("group", "close", gid)

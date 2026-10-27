@@ -443,7 +443,9 @@ async function goHistory(a, dir) {
     try {
       if (dir === 'back') await chrome.tabs.goBack(tab0.id);
       else await chrome.tabs.goForward(tab0.id);
-      return { tabId: tab0.id, dir, via: 'tabs.' + (dir === 'back' ? 'goBack' : 'goForward'), attempts: i + 1 };
+      await sleep(80);
+      const after = await chrome.tabs.get(tab0.id);
+      return { tabId: tab0.id, dir, url: after.url, via: 'tabs.' + (dir === 'back' ? 'goBack' : 'goForward'), attempts: i + 1 };
     } catch (e) {
       await sleep(300);
     }
@@ -2130,6 +2132,17 @@ const COMMANDS = {
     const maxDim = a.maxDimension === undefined ? 2000 : Math.max(100, Number(a.maxDimension));
     const full = a.full === true;
     let clip = null;
+
+    // A hidden tab is frozen: no compositor frame is produced on demand, so a
+    // capture would wait forever. Un-freeze it for the duration instead of
+    // activating the tab (which is exactly what the caller does not want).
+    if (tab.active === false) {
+      await withDebugger(tab.id, async (t) => {
+        await focusEmulation(t);
+        try { await chrome.debugger.sendCommand(t, 'Page.setWebLifecycleState', { state: 'active' }); }
+        catch (e) { /* older builds stay frozen; the capture timeout reports it */ }
+      }, true);
+    }
     try {
       const metrics = await withDebugger(tab.id, (t) => chrome.debugger.sendCommand(t, 'Page.getLayoutMetrics', {}));
       const viewport = metrics.cssVisualViewport || metrics.visualViewport || {};
