@@ -88,7 +88,38 @@ def _fail_pending(reason: str, code: str) -> None:
             pass
 
 
+def wait_for_extension(seconds: float = 8.0) -> bool:
+    end = time.time() + seconds
+    while time.time() < end:
+        with LOCK:
+            if EXT is not None:
+                return True
+        time.sleep(0.15)
+    return False
+
+
+# Commands that can be replayed without side effects. A worker restart mid-call
+# otherwise surfaces as a 60s timeout even though nothing happened.
+IDEMPOTENT = {
+    "ping", "doctor", "diag.apis", "browser.info", "debugger.state",
+    "tab.list", "tab.get", "window.list", "panel.state", "panel.focus",
+    "lease.list", "marks", "sessions.recent",
+    "snapshot", "observe", "text", "get-html", "extract", "evaluate",
+    "console.read", "network.read", "screenshot",
+}
+
+
 def call(cmd: str, args: dict | None = None, timeout: float = 30.0):
+    try:
+        return _call_once(cmd, args, timeout)
+    except BridgeError as exc:
+        if exc.code in ("extension_unavailable", "timeout") and cmd in IDEMPOTENT \
+                and wait_for_extension(8.0):
+            return _call_once(cmd, args, timeout)
+        raise
+
+
+def _call_once(cmd: str, args: dict | None = None, timeout: float = 30.0):
     with LOCK:
         conn = EXT
     if conn is None:

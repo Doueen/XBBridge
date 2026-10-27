@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>xb bridge</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #12181f; --muted: #6b7784; --line: #e3e8ee;
+    --chip: #eafaf4; --chip-fg: #0f766e; --warn: #fff4e5; --warn-fg: #9a5b00;
+    --btn: #f2f5f8; --accent: #0d9488;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#151a20; --fg:#e7edf3; --muted:#98a4b3; --line:#2a323c;
+            --chip:#12312c; --chip-fg:#5eead4; --warn:#3a2a12; --warn-fg:#fbbf24;
+            --btn:#1e252d; --accent:#2dd4bf; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; width: 380px; max-height: 560px; overflow: auto;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  header { padding: 12px 14px 10px; border-bottom: 1px solid var(--line); }
+  .top { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa5b1; flex: 0 0 auto; }
+  .dot.on { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  h1 { font-size: 13px; margin: 0; font-weight: 600; }
+  .ver { margin-left: auto; color: var(--muted); font-size: 11px; }
+  .totals { margin-top: 6px; color: var(--muted); font-size: 12px; }
+  .rows { padding: 6px 8px 10px; }
+  .row { padding: 8px 6px; border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: 0; }
+  .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .url { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta { display: flex; align-items: center; gap: 6px; margin-top: 5px; flex-wrap: wrap; }
+  .chip { background: var(--chip); color: var(--chip-fg); border-radius: 999px; padding: 1px 8px; font-size: 11px; }
+  .chip.warn { background: var(--warn); color: var(--warn-fg); }
+  .spacer { flex: 1; }
+  button {
+    font: inherit; font-size: 11px; padding: 3px 9px; border-radius: 6px; cursor: pointer;
+    background: var(--btn); color: var(--fg); border: 1px solid var(--line);
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .empty { padding: 26px 16px; text-align: center; color: var(--muted); }
+  .empty strong { display: block; color: var(--fg); margin-bottom: 4px; }
+  footer {
+    display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line);
+    position: sticky; bottom: 0; background: var(--bg);
+  }
+  footer button { flex: 1; padding: 6px 8px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <span id="dot" class="dot"></span>
+    <h1>xb bridge</h1>
+    <span id="ver" class="ver">v—</span>
+  </div>
+  <div id="totals" class="totals">连接状态读取中…</div>
+</header>
+
+<div id="rows" class="rows"></div>
+
+<footer>
+  <button id="unmark-all">全部取消标记</button>
+  <button id="reconnect">重连桥</button>
+</footer>
+
+<script src="popup.js"></script>
+</body>
+</html>

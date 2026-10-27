@@ -395,6 +395,33 @@ def main() -> int:
     check("logs prints the daemon log", "bridge up" in logs or "extension" in logs, logs.splitlines()[-1][:40] if logs else "")
     xb("unmark", "--all")
 
+    print("== background work ==")
+    bg2 = xb("open", f"{SITE}/app.html", "--background")["id"]
+    active0 = next(t["id"] for t in xb("tabs") if t["active"])
+    xb("click", "#btn-slow", "--tab", bg2)
+    wbg = xb("wait-for-element", "#delayed", "--state", "visible", "--timeout", 8000, "--tab", bg2)
+    active1 = next(t["id"] for t in xb("tabs") if t["active"])
+    check("waits work inside a background tab", wbg["ms"] < 8000, f"{wbg['ms']}ms")
+    check("background work never moved the active tab", active0 == active1, f"{active0} -> {active1}")
+    xb("close", bg2)
+
+    print("== panel ==")
+    bg = xb("open", f"{SITE}/beta.html", "--background")["id"]
+    xb("mark", "--tab", bg, "--label", "panel row")
+    state = xb("panel")
+    row = next((r for r in state["rows"] if r["tabId"] == bg), None)
+    check("panel lists a marked tab with its label", row is not None and row["label"] == "panel row",
+          f"{len(state['rows'])} row(s), v{state['version']}")
+    check("panel reports bridge state and totals",
+          state["connected"] is True and isinstance(state["totals"], dict), str(state["totals"]))
+    code, body = raw_rpc("panel.focus", {"tabId": bg})
+    now_active = [t["id"] for t in xb("tabs") if t["active"]]
+    check("panel.focus brings the tab forward", code == 200 and now_active == [bg], str(now_active))
+    code, body = raw_rpc("panel.unmark", {"all": True})
+    check("panel.unmark --all clears the rows",
+          code == 200 and body["result"]["totals"]["marked"] == 0, str(body.get("result", {}).get("totals")))
+    xb("close", bg)
+
     print("== teardown ==")
     keeper = xb("open", f"{SITE}/gamma.html")["id"]
     xb("group", "close", gid)

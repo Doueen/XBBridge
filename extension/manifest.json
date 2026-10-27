@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "xb — Edge/Chromium Agent Bridge",
-  "version": "0.2.0",
-  "description": "Local agent bridge for Edge/Chromium: tab groups, tabs, windows and page control over 127.0.0.1 WebSocket. Skipped features of bsk: tabGroups.",
+  "version": "0.3.0",
+  "description": "Local agent bridge for Edge/Chromium: tab groups, control markers, leases and page control over 127.0.0.1 WebSocket.",
   "minimum_chrome_version": "116",
   "permissions": [
     "tabs",
@@ -31,6 +31,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "xb bridge (click to reconnect)"
+    "default_title": "xb bridge — 点击查看受控标签",
+    "default_popup": "popup.html"
   }
 }

@@ -20,6 +20,7 @@ bsk（[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)，MIT）�
 | **批量动作** `batch` | 一个来回跑最多 100 步，逐步返回结果；失败时 `outcome=applied` + `details.results`，调用方不会盲目重试造成重复提交 |
 | **错误契约** | 每个失败带 `code / outcome / retryable`，CLI 映射成稳定退出码 |
 | **租约与代际** `claim/release/leases` | 一个客户端认领标签后，别人动它就报 `tab_not_owned`；页面导航后 `expectGeneration` 过期报 `stale_generation`，避免在没看过的文档上乱点 |
+| **工具栏面板** | 点扩展图标就能看到"现在有哪些标签被控制/被租用"，每行可一键切到前台或取消标记；命令行侧同一份数据用 `xb panel` |
 | **全页/裁剪/元素截图** | `--full`、`--clip x,y,w,h`、`--selector`、`--format jpeg --quality`，长边默认截到 2000 CSS px，dpr 折算进 scale，出图尺寸可断言 |
 
 ## 安装（一次性）
@@ -28,7 +29,7 @@ bsk（[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)，MIT）�
 # 1) 扩展
 edge://extensions  ->  开发人员模式  ->  加载解压缩的扩展  ->  选 edge-agent\extension
 # 2) 自检
-python xb.py status      # 期望：extension: connected  v0.2.0
+python xb.py status      # 期望：extension: connected  v0.3.0
 ```
 
 守护进程不用手动起，任何 `xb` 命令发现它不在都会自己拉起来（日志 `.xb/server.log`）；
@@ -63,6 +64,7 @@ xb pulse --selector "#q" --tab 12
 xb claim --tab 12 --label "抓禅道" [--ttl 300]     # 之后同 tab 的命令自动带 token
 xb leases                                          # 谁占着哪些标签、还剩多久
 xb release --tab 12 | --all
+xb panel                                           # 与扩展工具栏面板同一份快照
 
 # 等待（bsk 的可靠性核心）
 xb wait-ms 500
@@ -125,7 +127,6 @@ xb recent / xb restore [sessionId] / xb doctor / xb apis / xb logs -n 50
 | `debug`（请求重放/证据导出） | 依赖 bsk 的 network-store 与归档格式 |
 | `cooperate` / `session` / `browsers` | bsk 是 Agent Window + 多实例注册；xb 直接操作你的窗口，单浏览器（租约已覆盖"谁在动这个标签"） |
 | `install-skill` / `update` | 分发相关 |
-| 独立 popup 面板 | 现在用 `xb marks` / `xb leases` 看状态；图形面板还没做 |
 
 ## 实测踩过的坑（Edge 155）
 
@@ -150,10 +151,11 @@ edge-agent/
   xb.py                     CLI（bsk 命令名 + 标签组 + 可见性 + 租约）
   bridge/server.py          本地桥：WS ← 扩展，HTTP ← CLI（错误契约、断线即唤醒）
   extension/manifest.json   MV3：tabs tabGroups windows scripting debugger sessions downloads …
-  extension/sw.js           命令路由 + 注入函数 + 标记/租约/代际
+  extension/sw.js           命令路由 + 注入函数 + 标记/租约/代际 + 面板快照
+  extension/popup.html/.js  工具栏面板（受控标签、租约倒计时、一键切前台）
   test/site/*               自测站点（惰性元素/表单/下拉/上传/下载/拖拽/表格/console/network）
   test/launch.py            起一个干净的测试 profile 并等扩展连上
-  test/e2e.py               72 项端到端断言
+  test/e2e.py               78 项端到端断言
   test/kill-edge.ps1        只杀带指定 profile 标记的 msedge
 ```
 
@@ -166,13 +168,14 @@ python test/e2e.py                                            # 终端 C
 powershell -File test/kill-edge.ps1 -Match xb-try             # 清理
 ```
 
-最近一次：**72/72 ALL GREEN**，覆盖等待/竞态、@eN 快照与引用点击、console/network 缓冲、
+最近一次：**78/78 ALL GREEN**，覆盖等待/竞态、@eN 快照与引用点击、console/network 缓冲、
 回车提交导航、select/hover/wheel/scroll-to、上传/下载落盘、extract 表格、emulate 手机视口、
 截图几何（视口/全页/裁剪/元素/后台不抢焦点）、标签组全套、split/unsplit、sleep、recent、
 错误契约（5/6 退出码与 outcome）、标记生命周期与自动标记、拖拽、可信点击、批量与部分失败语义、
-租约/代际（外部调用被拒、导航后 stale_generation、release 后恢复）。
+租约/代际（外部调用被拒、导航后 stale_generation、release 后恢复）、面板（列表/前台/清标记）、
+后台标签内等待（不抢焦点、SW 存活期间完成）。
 
-命令覆盖：58 个声明子命令里 54 个被 e2e 实际调用；`request-help`（要人工点）、`restore`（会恢复已关标签）、
+命令覆盖：59 个声明子命令里 55 个被 e2e 实际调用；`request-help`（要人工点）、`restore`（会恢复已关标签）、
 `serve`/`stop`（会把跑测试用的守护进程停掉）属于**故意手工**。
 
 ## 参考资料

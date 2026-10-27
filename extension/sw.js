@@ -16,7 +16,7 @@ const KEEPALIVE_ALARM = 'xb-keepalive';
 let ws = null;
 let backoff = RECONNECT_MIN;
 let connecting = false;
-let stats = { connectedAt: null, lastCmdAt: null, cmds: 0, errors: 0 };
+let stats = { connectedAt: null, lastCmdAt: null, cmds: 0, errors: 0, boots: 0, lastError: null };
 
 const log = (...a) => console.log('[xb]', ...a);
 
@@ -133,11 +133,33 @@ function reply(id, ok, payload) {
   ws.send(JSON.stringify(msg));
 }
 
+/* ---- keep the worker alive while a command is in flight ---- */
+
+let ALIVE_TIMER = null;
+let INFLIGHT = 0;
+
+function holdAlive() {
+  INFLIGHT += 1;
+  if (ALIVE_TIMER) return;
+  // An MV3 worker can be torn down after ~30s without extension-API activity,
+  // and a command awaiting a long page operation is exactly when that hurts.
+  ALIVE_TIMER = setInterval(() => { chrome.runtime.getPlatformInfo().catch(() => {}); }, 20000);
+}
+
+function releaseAlive() {
+  INFLIGHT = Math.max(0, INFLIGHT - 1);
+  if (INFLIGHT === 0 && ALIVE_TIMER) {
+    clearInterval(ALIVE_TIMER);
+    ALIVE_TIMER = null;
+  }
+}
+
 async function handle(msg) {
   stats.cmds += 1;
   stats.lastCmdAt = Date.now();
   if (!msg || !msg.cmd) return;
   const id = msg.id;
+  holdAlive();
   try {
     const fn = COMMANDS[msg.cmd];
     if (!fn) throw fail('unsupported_method', `unknown command: ${msg.cmd}`);
@@ -149,6 +171,8 @@ async function handle(msg) {
     const payload = errorPayload(e);
     stats.lastError = payload;
     reply(id, false, payload);
+  } finally {
+    releaseAlive();
   }
 }
 
@@ -217,6 +241,50 @@ function reclaimLeases() {
   }
 }
 setInterval(reclaimLeases, 15 * 1000);
+
+/* ---- panel: one snapshot the popup and the CLI both render ---- */
+
+async function panelState() {
+  reclaimLeases();
+  const all = await chrome.tabs.query({});
+  const rows = [];
+  for (const t of all) {
+    const mark = MARKS.get(t.id);
+    const lease = LEASES.get(t.id);
+    if (!mark && !lease) continue;
+    rows.push({
+      tabId: t.id,
+      windowId: t.windowId,
+      active: !!t.active,
+      discarded: !!t.discarded,
+      title: t.title || '',
+      url: t.url || '',
+      marked: !!mark,
+      label: (mark && mark.label) || (lease && lease.label) || '',
+      lease: lease ? { expiresInMs: Math.max(0, lease.expiresAt - Date.now()) } : null,
+      generation: generationOf(t.id)
+    });
+  }
+  rows.sort((a, b) => (a.windowId - b.windowId) || (a.tabId - b.tabId));
+  return {
+    version: chrome.runtime.getManifest().version,
+    connected: !!(ws && ws.readyState === WebSocket.OPEN),
+    wsPort: WS_PORT,
+    totals: { tabs: all.length, marked: MARKS.size, leased: LEASES.size },
+    worker: { boots: stats.boots, cmds: stats.cmds, errors: stats.errors, lastError: stats.lastError },
+    debugger: Array.from(DBG.entries()).map(([tabId, s]) => ({
+      tabId, attached: !!s.attached, console: s.console.length, network: s.network.length
+    })),
+    rows
+  };
+}
+
+async function panelFocus(tabId) {
+  const tab = await chrome.tabs.get(Number(tabId));
+  await chrome.tabs.update(tab.id, { active: true });
+  await chrome.windows.update(tab.windowId, { focused: true });
+  return { focused: tab.id };
+}
 
 function shapeTab(t) {
   return {
@@ -549,6 +617,17 @@ function _fBox(sel) {
   const r = el.getBoundingClientRect();
   return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
            w: Math.round(r.width), h: Math.round(r.height), vw: window.innerWidth, vh: window.innerHeight };
+}
+
+function _fElementState(sel) {
+  const el = document.querySelector(sel);
+  if (!el) return { exists: false, visible: false };
+  const r = el.getBoundingClientRect();
+  const st = getComputedStyle(el);
+  return {
+    exists: true,
+    visible: r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none' && st.opacity !== '0'
+  };
 }
 
 function _fWaitElement(sel, state, timeoutMs) {
@@ -1536,9 +1615,29 @@ const COMMANDS = {
     else if (typeof raw === 'string' && raw.length) selector = raw;
     else throw new Error('ref or selector required');
     const tab = await getTab(a.tabId);
-    const out = await inject(tab.id, _fWaitElement, [selector, state, timeoutMs], frameId);
-    if (!out.ok) throw new Error(out.error);
-    return { tabId: tab.id, selector, state, ms: out.ms };
+    // Poll from the worker, not from an injected interval: a background tab has
+    // its timers throttled (to a minute under intensive throttling), which made
+    // waits unreliable exactly in the "work in a background tab" case.
+    const started = Date.now();
+    const deadline = started + timeoutMs;
+    let seen = null;
+    for (;;) {
+      const s = await safeInject(tab.id, _fElementState, [selector], frameId, 2000);
+      if (s) {
+        seen = s;
+        const ok = state === 'attached' ? s.exists
+          : state === 'detached' ? !s.exists
+          : state === 'hidden' ? !s.visible
+          : s.visible;
+        if (ok) return { tabId: tab.id, selector, state, ms: Date.now() - started };
+      }
+      if (Date.now() >= deadline) {
+        const detail = seen ? (seen.exists ? 'element exists but is not ' + state : 'element never appeared') : 'page not reachable';
+        throw fail('timeout', `timeout waiting for ${state}: ${selector} (${detail})`,
+                   { retryable: true });
+      }
+      await sleep(120);
+    }
   },
 
   async 'wait-for-navigation'(a) {
@@ -1819,6 +1918,25 @@ const COMMANDS = {
   async 'lease.list'() {
     reclaimLeases();
     return Array.from(LEASES.entries()).map(([tabId, l]) => leaseView(tabId, l));
+  },
+
+  /* ---- panel: what the popup shows ---- */
+
+  async 'panel.state'() { return await panelState(); },
+
+  async 'panel.focus'(a) {
+    if (a.tabId === undefined) throw fail('invalid_params', 'tabId required');
+    return await panelFocus(a.tabId);
+  },
+
+  async 'panel.unmark'(a) {
+    if (a.all === true) {
+      for (const id of Array.from(MARKS.keys())) await clearMark(id);
+      return await panelState();
+    }
+    const tab = await getTab(a.tabId);
+    await clearMark(tab.id);
+    return await panelState();
   },
 
   /* ---- Chromium/Edge extras ---- */
@@ -2253,6 +2371,48 @@ const COMMANDS = {
 
 /* ------------------------------------------------------------------ boot */
 
+/* ---- popup bridge: the toolbar panel talks to the worker over runtime messages ---- */
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!msg || msg.xb !== true) return false;
+  const reply = (payload) => { try { sendResponse(payload); } catch (e) { /* popup closed */ } };
+  (async () => {
+    try {
+      switch (msg.op) {
+        case 'state':
+          reply({ ok: true, result: await panelState() });
+          break;
+        case 'focus':
+          reply({ ok: true, result: await panelFocus(msg.tabId) });
+          break;
+        case 'unmark':
+          reply({ ok: true, result: await COMMANDS['panel.unmark']({ tabId: msg.tabId, all: msg.all === true }) });
+          break;
+        case 'release':
+          if (msg.all === true) {
+            for (const id of Array.from(LEASES.keys())) { LEASES.delete(id); await clearMark(id); }
+          } else {
+            const id = Number(msg.tabId);
+            LEASES.delete(id);
+            await clearMark(id);
+          }
+          reply({ ok: true, result: await panelState() });
+          break;
+        case 'reconnect':
+          backoff = RECONNECT_MIN;
+          connect();
+          reply({ ok: true, result: await panelState() });
+          break;
+        default:
+          reply({ ok: false, error: `unknown op: ${msg.op}` });
+      }
+    } catch (e) {
+      reply({ ok: false, error: String((e && e.message) || e) });
+    }
+  })();
+  return true;   // keep the channel open for the async reply
+});
+
 chrome.runtime.onInstalled.addListener(() => { connect(); });
 chrome.runtime.onStartup.addListener(() => { connect(); });
 chrome.action.onClicked.addListener(() => { backoff = RECONNECT_MIN; connect(); });
@@ -2282,4 +2442,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 connect();
 restoreMarks().catch(() => {});
+
+/* count worker boots so a silent restart storm is visible in `xb panel` */
+(async () => {
+  try {
+    const got = await chrome.storage.session.get('xbBoots');
+    stats.boots = Number(got.xbBoots || 0) + 1;
+    await chrome.storage.session.set({ xbBoots: stats.boots });
+  } catch (e) { /* storage is best-effort */ }
+})();
+
 log('service worker booted');

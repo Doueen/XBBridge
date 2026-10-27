@@ -167,6 +167,14 @@ def csv_list(spec: str) -> list[str]:
     return [x.strip() for x in str(spec).split(",") if x.strip()]
 
 
+def _host(url: str) -> str:
+    from urllib.parse import urlsplit
+    try:
+        return urlsplit(url or "").hostname or (url or "")
+    except Exception:
+        return url or ""
+
+
 # ------------------------------------------------------------------- leases
 def _lease_path() -> str:
     return os.path.join(HERE, ".xb", "leases.json")
@@ -418,6 +426,7 @@ def build_parser() -> argparse.ArgumentParser:
     rl = sub.add_parser("release", help="release a claim (and its marker)")
     rl.add_argument("--tab", type=int); rl.add_argument("--all", action="store_true")
     sub.add_parser("leases", help="list active claims")
+    sub.add_parser("panel", help="tabs the agent controls (same view as the toolbar popup)")
 
     return p
 
@@ -803,6 +812,31 @@ def main(argv=None) -> int:
             for l in rows:
                 print(f"{l['tabId']:>7}  {l['expiresInMs'] // 1000:>4}s  gen {l['generation']:<4} "
                       f"{(l.get('label') or '(unlabelled)')[:50]}")
+    elif args.cmd == "panel":
+        st = rpc("panel.state", {})
+        if j:
+            print(json.dumps(st, ensure_ascii=False, indent=2))
+        else:
+            state = "connected" if st.get("connected") else "NOT connected"
+            t = st.get("totals") or {}
+            w = st.get("worker") or {}
+            print(f"xb {st.get('version')}  bridge {state}  :{st.get('wsPort')}  "
+                  f"{t.get('tabs', 0)} tab(s), {t.get('marked', 0)} marked, {t.get('leased', 0)} leased"
+                  f"  ·  worker boots {w.get('boots', 0)} cmds {w.get('cmds', 0)} errors {w.get('errors', 0)}")
+            rows = st.get("rows") or []
+            if not rows:
+                print("(no tab is claimed or marked)")
+            for r in rows:
+                bits = ["受控" if r.get("marked") else "—"]
+                if r.get("lease"):
+                    bits.append(f"租约 {r['lease']['expiresInMs'] // 1000}s")
+                bits.append(f"gen {r['generation']}")
+                if r.get("active"):
+                    bits.append("前台")
+                if r.get("discarded"):
+                    bits.append("休眠")
+                print(f"  {r['tabId']:>7}  {' '.join(bits):<28} {r.get('label') or r.get('title') or ''}"
+                      f"  [{_host(r.get('url'))}]")
     return 0
 
 
