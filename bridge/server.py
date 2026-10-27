@@ -2,8 +2,12 @@
 """xb bridge daemon — local WebSocket <-> HTTP gateway for the xb browser extension.
 
 Two listeners on loopback:
-  ws://127.0.0.1:8787    the extension connects here (role handshake via {"hello":...})
+  ws://127.0.0.1:8787    extensions connect here (role handshake via {"hello":...})
   http://127.0.0.1:8788  the CLI (or anything else) POSTs /rpc {"cmd":..,"args":..}
+
+Several browsers may stay connected at once (your daily Edge plus a throw-away
+test profile); each is registered by its own instanceId and addressed with
+`browser` on the request. With exactly one connected, `browser` may be omitted.
 
 No third-party deps beyond `websockets`.
 """
@@ -31,19 +35,22 @@ STATUS_BY_CODE = {
     "unsupported_method": 400,
     "target_not_found": 404,
     "no_target_tab": 404,
+    "browser_not_found": 404,
     "restricted_page": 409,
     "stale_generation": 409,
     "tab_not_owned": 409,
     "claim_required": 409,
+    "browser_required": 409,
+    "browser_ambiguous": 409,
     "extension_unavailable": 503,
     "unavailable": 503,
     "timeout": 504,
 }
 
 LOCK = threading.Lock()
-EXT = None            # live ServerConnection to the extension
-EXT_INFO: dict = {}   # hello payload
-PENDING: dict[str, queue.Queue] = {}
+EXTS: dict[str, dict] = {}      # instanceId -> {"conn", "info", "since", "seq"}
+PENDING: dict[str, dict] = {}   # rid -> {"q": Queue, "instance": instanceId}
+SEQ = 0
 STARTED = time.time()
 
 
@@ -71,14 +78,78 @@ class BridgeError(RuntimeError):
         return out
 
 
-def _fail_pending(reason: str, code: str) -> None:
-    """Wake every in-flight caller when the extension goes away.
+# ------------------------------------------------------------------ registry
 
-    Without this a call waits out its whole timeout after a disconnect, which
-    looks like a hung command instead of a lost browser.
-    """
+def _describe(instance_id: str, entry: dict) -> dict:
+    info = entry.get("info") or {}
+    return {
+        "instanceId": instance_id,
+        "label": info.get("label") or "",
+        "version": info.get("version") or "",
+        "browser": info.get("browserName") or "",
+        "userAgent": (info.get("browser") or "")[:160],
+        "connectedAt": entry.get("since"),
+        "connectedFor": round(time.time() - (entry.get("since") or time.time()), 1),
+    }
+
+
+def instances() -> list[dict]:
     with LOCK:
-        queues = list(PENDING.values())
+        rows = [(_describe(i, e), e.get("seq", 0)) for i, e in EXTS.items()]
+    rows.sort(key=lambda r: (-r[1], r[0]["instanceId"]))
+    return [r[0] for r in rows]
+
+
+def _listing() -> str:
+    rows = instances()
+    if not rows:
+        return "none connected"
+    return "; ".join(
+        f"{r['instanceId']}{' (' + r['label'] + ')' if r['label'] else ''} v{r['version']}"
+        for r in rows)
+
+
+def resolve_instance(browser: str | None) -> str:
+    """Map an explicit --browser value (id or unique label/prefix) to an instance."""
+    with LOCK:
+        ids = list(EXTS.keys())
+        infos = {i: (EXTS[i].get("info") or {}) for i in ids}
+    if not ids:
+        raise BridgeError(
+            "no browser is connected — open Edge with the xb extension loaded "
+            f"(it dials ws://127.0.0.1:{WS_PORT})",
+            code="extension_unavailable", retryable=True)
+    if browser:
+        want = str(browser).strip()
+        low = want.lower()
+        hits = [i for i in ids if i == want]
+        if not hits:
+            hits = [i for i in ids if (infos[i].get("label") or "").lower() == low]
+        if not hits:
+            hits = [i for i in ids if i.startswith(want)
+                    or (infos[i].get("label") or "").lower().startswith(low)]
+        if not hits:
+            raise BridgeError(f"no browser matches {want!r} — connected: {_listing()}",
+                              code="browser_not_found",
+                              details={"instances": instances()})
+        if len(hits) > 1:
+            raise BridgeError(
+                f"{want!r} matches {len(hits)} browsers ({', '.join(hits)}); "
+                "use the full instance id or give them distinct labels",
+                code="browser_ambiguous", details={"matches": hits})
+        return hits[0]
+    if len(ids) == 1:
+        return ids[0]
+    raise BridgeError(
+        f"{len(ids)} browsers are connected — pick one with --browser <instance|label> "
+        f"(`xb browsers`); connected: {_listing()}",
+        code="browser_required", details={"instances": instances()})
+
+
+def _fail_instance(instance_id: str, reason: str, code: str) -> None:
+    """Wake only the callers that were talking to the browser that just went away."""
+    with LOCK:
+        queues = [p["q"] for p in PENDING.values() if p.get("instance") == instance_id]
     for q in queues:
         try:
             q.put_nowait({"ok": False,
@@ -88,11 +159,11 @@ def _fail_pending(reason: str, code: str) -> None:
             pass
 
 
-def wait_for_extension(seconds: float = 8.0) -> bool:
+def wait_for_instance(instance_id: str, seconds: float = 8.0) -> bool:
     end = time.time() + seconds
     while time.time() < end:
         with LOCK:
-            if EXT is not None:
+            if instance_id in EXTS:
                 return True
         time.sleep(0.15)
     return False
@@ -109,33 +180,35 @@ IDEMPOTENT = {
 }
 
 
-def call(cmd: str, args: dict | None = None, timeout: float = 30.0):
+# ----------------------------------------------------------------------- rpc
+
+def call(cmd: str, args: dict | None = None, timeout: float = 30.0,
+         browser: str | None = None):
+    instance = resolve_instance(browser)
     try:
-        return _call_once(cmd, args, timeout)
+        return _call_once(instance, cmd, args, timeout)
     except BridgeError as exc:
         if exc.code in ("extension_unavailable", "timeout") and cmd in IDEMPOTENT \
-                and wait_for_extension(8.0):
-            return _call_once(cmd, args, timeout)
+                and wait_for_instance(instance, 8.0):
+            return _call_once(instance, cmd, args, timeout)
         raise
 
 
-def _call_once(cmd: str, args: dict | None = None, timeout: float = 30.0):
+def _call_once(instance: str, cmd: str, args: dict | None, timeout: float):
     with LOCK:
-        conn = EXT
+        entry = EXTS.get(instance)
+        conn = entry.get("conn") if entry else None
     if conn is None:
-        raise BridgeError(
-            "no extension connected — open Edge with the xb extension loaded "
-            f"(it dials ws://127.0.0.1:{WS_PORT})",
-            code="extension_unavailable", retryable=True,
-        )
+        raise BridgeError(f"browser {instance} is no longer connected",
+                          code="extension_unavailable", retryable=True)
     rid = uuid.uuid4().hex[:12]
     q: queue.Queue = queue.Queue()
-    PENDING[rid] = q
+    PENDING[rid] = {"q": q, "instance": instance}
     try:
         conn.send(json.dumps({"id": rid, "cmd": cmd, "args": args or {}}))
         msg = q.get(timeout=timeout)
     except queue.Empty:
-        raise BridgeError(f"timeout after {timeout:g}s waiting for '{cmd}'",
+        raise BridgeError(f"timeout after {timeout:g}s waiting for '{cmd}' on {instance}",
                           code="timeout", outcome="unknown", retryable=True)
     finally:
         PENDING.pop(rid, None)
@@ -153,7 +226,26 @@ def _call_once(cmd: str, args: dict | None = None, timeout: float = 30.0):
 
 
 def ws_handler(conn) -> None:
-    global EXT
+    global SEQ
+    instance = None
+    # A web page can open ws://127.0.0.1:8787 too (and would then be able to
+    # register itself as a "browser" and receive commands meant for one). Page
+    # handshakes always carry an http(s) Origin; extension service workers and
+    # local tools do not — so reject the page case outright.
+    origin = ""
+    try:
+        req = getattr(conn, "request", None)
+        origin = (req.headers.get("Origin") or "") if req is not None else ""
+    except Exception:
+        origin = ""
+    lowered = origin.lower()
+    if lowered.startswith(("http://", "https://")):
+        log(f"rejected ws connection from origin {origin!r} (websites may not join the bridge)")
+        try:
+            conn.close(code=1008, reason="web origins are not allowed")
+        except Exception:
+            pass
+        return
     try:
         for raw in conn:
             try:
@@ -162,25 +254,37 @@ def ws_handler(conn) -> None:
                 continue
             hello = msg.get("hello")
             if hello is not None:
+                # a reconnect of the same install replaces its old socket
+                instance = hello.get("instanceId") or f"anon-{id(conn) % 100000}"
                 with LOCK:
-                    EXT = conn
-                    EXT_INFO.clear()
-                    EXT_INFO.update(hello)
-                    EXT_INFO["connectedAt"] = time.time()
-                log("extension connected:", hello.get("name"), hello.get("version"))
+                    SEQ += 1
+                    old = EXTS.get(instance) or {}
+                    EXTS[instance] = {
+                        "conn": conn,
+                        "info": hello,
+                        "since": old.get("since") or time.time(),
+                        "seq": SEQ,
+                    }
+                label = hello.get("label")
+                log(f"browser connected: {instance}"
+                    f"{' (' + label + ')' if label else ''} v{hello.get('version')}"
+                    f" origin={origin or '-'}")
                 continue
-            q = PENDING.get(msg.get("id"))
-            if q is not None:
-                q.put(msg)
+            with LOCK:
+                entry = PENDING.get(msg.get("id"))
+            if entry is not None and entry.get("instance") == instance:
+                entry["q"].put(msg)
     except Exception as exc:  # connection reset etc.
-        if conn is EXT:
-            log("ws error:", exc)
+        if instance:
+            log("ws error:", instance, exc)
     finally:
         with LOCK:
-            if EXT is conn:
-                EXT = None
-        _fail_pending("the extension disconnected mid-command", "extension_unavailable")
-        log("extension disconnected")
+            if instance and (EXTS.get(instance) or {}).get("conn") is conn:
+                EXTS.pop(instance, None)
+        if instance:
+            _fail_instance(instance, f"browser {instance} disconnected mid-command",
+                           "extension_unavailable")
+            log("browser disconnected:", instance)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -198,13 +302,19 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path.split("?")[0] in ("/health", "/"):
-            with LOCK:
-                alive = EXT is not None
-                info = dict(EXT_INFO)
-            info.pop("stats", None)
-            self._send(200, {"ok": True, "extension": alive, "info": info,
-                             "pid": os.getpid(), "since": STARTED})
+        path = self.path.split("?")[0]
+        if path in ("/health", "/browsers", "/"):
+            rows = instances()
+            first = rows[0] if rows else {}
+            self._send(200, {
+                "ok": True,
+                "extension": bool(rows),          # legacy: any browser connected
+                "info": first,                    # legacy: the most recent browser
+                "instances": rows,
+                "count": len(rows),
+                "pid": os.getpid(),
+                "since": STARTED,
+            })
         else:
             self._send(404, {"ok": False, "error": "not found"})
 
@@ -222,11 +332,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             req = json.loads(raw or b"{}")
         except Exception as exc:
-            self._send(400, {"ok": False, "error": f"bad json: {exc}"})
+            self._send(400, {"ok": False, "error": {"code": "invalid_params",
+                                                    "message": f"bad json: {exc}",
+                                                    "outcome": "not_started",
+                                                    "retryable": False}})
             return
         try:
             result = call(req.get("cmd") or "", req.get("args") or {},
-                          float(req.get("timeout") or 30))
+                          float(req.get("timeout") or 30),
+                          browser=req.get("browser") or None)
             self._send(200, {"ok": True, "result": result})
         except BridgeError as exc:
             self._send(STATUS_BY_CODE.get(exc.code, 400),
@@ -247,7 +361,8 @@ def main() -> int:
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, name="http", daemon=True).start()
 
-    log(f"xb bridge up — ws://127.0.0.1:{WS_PORT}  http://127.0.0.1:{HTTP_PORT}")
+    log(f"xb bridge up — ws://127.0.0.1:{WS_PORT}  http://127.0.0.1:{HTTP_PORT}"
+        f"  (multi-browser: `xb browsers`)")
     try:
         while True:
             time.sleep(3600)

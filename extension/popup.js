@@ -77,7 +77,8 @@ function renderRow(row) {
 
 function render(state) {
   if (!state) return;
-  ver.textContent = `v${state.version}`;
+  ver.textContent = state.label ? `${state.label} · v${state.version}` : `v${state.version}`;
+  ver.title = `instance ${state.instanceId || '?'} — xb --browser 可用这个 id 或上面的名字`;
   dot.classList.toggle('on', !!state.connected);
   const t = state.totals || {};
   totals.textContent = state.connected

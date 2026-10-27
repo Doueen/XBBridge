@@ -8,6 +8,9 @@
  * Protocol:  {id, cmd, args}  ->  {id, ok:true, result} | {id, ok:false, error}
  */
 
+/* Flipped to false by tools/build_store.py: the store build must not be able
+ * to make Chrome reload the extension from disk (dev convenience only). */
+const DEV_MODE = true;
 const WS_PORT = 8787;
 const RECONNECT_MIN = 800;
 const RECONNECT_MAX = 15000;
@@ -16,6 +19,7 @@ const KEEPALIVE_ALARM = 'xb-keepalive';
 let ws = null;
 let backoff = RECONNECT_MIN;
 let connecting = false;
+let identity = { id: '', label: '' };   // per-instance identity, persisted in storage.local
 let stats = { connectedAt: null, lastCmdAt: null, cmds: 0, errors: 0, boots: 0, lastError: null };
 
 const log = (...a) => console.log('[xb]', ...a);
@@ -37,6 +41,46 @@ self.addEventListener('unhandledrejection', (e) => {
   const r = e && e.reason;
   recordFault('rejection', (r && (r.message || r)) || 'unhandled rejection');
 });
+
+/* ---- identity: one stable id per browser install, plus a human label ----
+ * The bridge keys its registry on instanceId, so several browsers (your daily
+ * Edge + a throw-away test profile) can be connected at once.
+ */
+async function loadIdentity() {
+  try {
+    const got = await chrome.storage.local.get(['xbInstanceId', 'xbLabel']);
+    identity.id = got.xbInstanceId || '';
+    identity.label = got.xbLabel || '';
+    if (!identity.id) {
+      const raw = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+      identity.id = raw.replace(/-/g, '').slice(0, 12);
+      await chrome.storage.local.set({ xbInstanceId: identity.id });
+    }
+  } catch (e) { /* storage unavailable: fall back to a session-only id */
+    if (!identity.id) identity.id = 'anon-' + String(Date.now()).slice(-6);
+  }
+  return identity;
+}
+
+function sendHello(sock) {
+  const s = sock || ws;
+  if (!s || s.readyState !== WebSocket.OPEN) return;
+  const ua = navigator.userAgent;
+  try {
+    s.send(JSON.stringify({
+      hello: {
+        role: 'extension',
+        name: 'xb',
+        instanceId: identity.id,
+        label: identity.label,
+        version: chrome.runtime.getManifest().version,
+        browser: ua,
+        browserName: /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chromium' : 'unknown',
+        stats
+      }
+    }));
+  } catch (e) { /* socket about to die */ }
+}
 
 /* --------------------------------------------------------------- errors */
 
@@ -101,9 +145,10 @@ function errorPayload(e) {
 
 /* ------------------------------------------------------------------ socket */
 
-function connect() {
+async function connect() {
   if (connecting) return;
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  if (!identity.id) await loadIdentity();
   connecting = true;
   let sock;
   try {
@@ -118,17 +163,7 @@ function connect() {
     backoff = RECONNECT_MIN;
     stats.connectedAt = Date.now();
     log('connected');
-    try {
-      sock.send(JSON.stringify({
-        hello: {
-          role: 'extension',
-          name: 'xb',
-          version: chrome.runtime.getManifest().version,
-          browser: navigator.userAgent,
-          stats
-        }
-      }));
-    } catch (e) { /* ignore */ }
+    sendHello(sock);
   };
   sock.onmessage = (ev) => {
     let msg;
@@ -287,6 +322,8 @@ async function panelState() {
   return {
     version: chrome.runtime.getManifest().version,
     name: chrome.runtime.getManifest().name,
+    instanceId: identity.id,
+    label: identity.label,
     connected: !!(ws && ws.readyState === WebSocket.OPEN),
     wsPort: WS_PORT,
     totals: { tabs: all.length, marked: MARKS.size, leased: LEASES.size },
@@ -1949,9 +1986,19 @@ const COMMANDS = {
 
   async 'panel.state'() { return await panelState(); },
 
+  /* name this browser so --browser <label> works without remembering the id */
+  async 'label.set'(a) {
+    const label = a.label === undefined ? '' : String(a.label).slice(0, 40);
+    identity.label = label;
+    try { await chrome.storage.local.set({ xbLabel: label }); } catch (e) { /* ignore */ }
+    sendHello();          // the bridge updates its registry on hello
+    return { instanceId: identity.id, label };
+  },
+
   /* dev-only: re-read the extension from disk after editing manifest/icons.
    * The reply goes out first; the worker then kills itself and Chrome reloads it. */
-  async 'dev.reload'() {
+  async 'dev.reload'(a) {
+    if (!DEV_MODE) throw fail('unsupported_method', 'dev.reload is not available in store builds');
     setTimeout(() => { try { chrome.runtime.reload(); } catch (e) { /* ignore */ } }, 250);
     return { reloading: true, version: chrome.runtime.getManifest().version };
   },

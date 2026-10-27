@@ -28,12 +28,14 @@ SERVER = os.path.join(HERE, "bridge", "server.py")
 LOG = os.path.join(HERE, ".xb", "server.log")
 COLORS = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan"]
 JSON_MODE = False
+BROWSER: str | None = None      # resolved target browser (id or label), set in main()
 
 # exit codes: stable per failure class so scripts can branch without parsing
 EXIT_BY_CODE = {
     "invalid_params": 2, "unsupported_method": 2,
     "no_target_tab": 3, "extension_unavailable": 3, "unavailable": 3, "bridge_unavailable": 3,
-    "window_minimized": 3,
+    "window_minimized": 3, "browser_not_found": 3,
+    "browser_required": 2, "browser_ambiguous": 2,
     "timeout": 4,
     "target_not_found": 5, "restricted_page": 5,
     "stale_generation": 6, "tab_not_owned": 6, "claim_required": 6, "batch_failed": 6,
@@ -122,8 +124,11 @@ def rpc(cmd: str, args: dict | None = None, timeout: float = 60.0):
         if token:
             args["lease"] = token
     ensure_daemon(quiet=True)
+    payload = {"cmd": cmd, "args": args or {}, "timeout": timeout}
+    if BROWSER:
+        payload["browser"] = BROWSER
     try:
-        res = http("/rpc", {"cmd": cmd, "args": args or {}, "timeout": timeout}, timeout=timeout + 5)
+        res = http("/rpc", payload, timeout=timeout + 5)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")
         try:
@@ -173,6 +178,67 @@ def _host(url: str) -> str:
         return urlsplit(url or "").hostname or (url or "")
     except Exception:
         return url or ""
+
+
+# ------------------------------------------------------------- browser target
+def _default_browser_path() -> str:
+    return os.path.join(HERE, ".xb", "default-browser")
+
+
+def load_default_browser() -> str:
+    try:
+        with open(_default_browser_path(), encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def save_default_browser(value: str) -> None:
+    path = _default_browser_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if value:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(value)
+            f.write("\n")
+    else:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def target_browser(explicit: str | None) -> str | None:
+    """--browser wins, then XB_BROWSER, then the saved default."""
+    return explicit or os.environ.get("XB_BROWSER") or load_default_browser() or None
+
+
+def list_browsers() -> list[dict]:
+    """Ask the daemon which browsers are connected (no browser selection needed)."""
+    ensure_daemon(quiet=True)
+    try:
+        return http("/browsers", timeout=5).get("instances") or []
+    except Exception:
+        return []
+
+
+def _pick_browser(rows: list[dict], want: str) -> dict:
+    """Resolve a user-typed id/label/prefix against the connected browsers."""
+    want = str(want).strip()
+    low = want.lower()
+    hits = [r for r in rows if r["instanceId"] == want]
+    if not hits:
+        hits = [r for r in rows if (r.get("label") or "").lower() == low]
+    if not hits:
+        hits = [r for r in rows if r["instanceId"].startswith(want)
+                or (r.get("label") or "").lower().startswith(low)]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise XbFailure("browser_not_found", f"no browser matches {want!r} — see `xb browsers`",
+                        cmd="use")
+    raise XbFailure("browser_ambiguous",
+                    f"{want!r} matches {len(hits)} browsers: "
+                    + ", ".join(h["instanceId"] for h in hits), cmd="use")
 
 
 # ------------------------------------------------------------------- leases
@@ -268,6 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="xb", description="Edge/Chromium agent bridge (bsk-parity CLI)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--session", help="bsk compatibility: accepted and ignored (xb has one live browser)")
+    p.add_argument("--browser", help="target browser: instance id or label (default: $XB_BROWSER, then `xb use`)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     tgt = argparse.ArgumentParser(add_help=False)
@@ -279,6 +346,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # infra
     sub.add_parser("status")
+    sub.add_parser("browsers", help="list connected browsers and which one is the default")
+    use = sub.add_parser("use", help="make a browser the default for this repo")
+    use.add_argument("target", help="instance id or label")
+    lb = sub.add_parser("label", help="name the selected browser (then --browser <label> works)")
+    lb.add_argument("text", nargs="?", default="")
     sub.add_parser("doctor")
     sub.add_parser("apis")
     sub.add_parser("serve")
@@ -433,34 +505,99 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    global JSON_MODE
+    global JSON_MODE, BROWSER
     args = build_parser().parse_args(argv)
     j = args.json
     JSON_MODE = bool(j)
+    BROWSER = target_browser(getattr(args, "browser", None))
     tab = getattr(args, "tab", None)
+
+    if args.cmd in ("browsers", "use", "label"):
+        rows = list_browsers()
+        default = load_default_browser()
+
+        if args.cmd == "browsers":
+            if j:
+                print(json.dumps({"default": default, "count": len(rows), "instances": rows},
+                                 ensure_ascii=False, indent=2))
+            elif not rows:
+                print("(no browser connected) — open Edge with the extension loaded, "
+                      f"it dials ws://127.0.0.1:{WS_PORT}")
+            else:
+                print(f"{'':2}{'INSTANCE':<14}{'LABEL':<16}{'VER':<8}{'BROWSER':<8}UP")
+                for r in rows:
+                    mark = "*" if default and (r["instanceId"] == default
+                                               or (r.get("label") or "") == default) else " "
+                    print(f"{mark:2}{r['instanceId']:<14}{(r.get('label') or '-'):<16}"
+                          f"{(r.get('version') or '-'):<8}{(r.get('browser') or '-'):<8}"
+                          f"{r.get('connectedFor', 0):.0f}s")
+                if not default:
+                    print("\n(*) none; `xb use <instance|label>` picks a default for this repo")
+            return 0
+
+        if args.cmd == "use":
+            want = args.target
+            rows = list_browsers()
+            if not rows:
+                raise XbFailure("browser_not_found", "no browser is connected", cmd="use")
+            hit = _pick_browser(rows, want)
+            save_default_browser(hit["instanceId"])
+            emit({"default": hit["instanceId"], "label": hit.get("label") or "", **hit}, j,
+                 lambda r: print(f"default browser -> {r['instanceId']}"
+                                 + (f" ({r['label']})" if r.get("label") else "")))
+            return 0
+
+        # label
+        r = rpc("label.set", {"label": args.text})
+        if not default:
+            save_default_browser(r["instanceId"])
+        emit(r, j, lambda rr: print(f"browser {rr['instanceId']} labelled "
+                                    + (f"'{rr['label']}'" if rr["label"] else "(cleared)")))
+        return 0
 
     if args.cmd == "status":
         if not daemon_alive():
             ensure_daemon(quiet=True)
         h = http("/health")
-        ext = h.get("info") or {}
-        tabs = rpc("tab.list", {}) if h.get("extension") else []
-        groups = rpc("group.list", {}) if h.get("extension") else []
+        rows = h.get("instances") or []
+        # only ask a browser for its tabs when the target is unambiguous
+        ask = bool(rows) and (BROWSER is not None or len(rows) == 1)
+        tabs, groups = [], []
+        if ask:
+            try:
+                tabs = rpc("tab.list", {})
+                groups = rpc("group.list", {})
+            except XbFailure:
+                ask = False       # a stale --browser/use target must not break status
         out = {"daemon": {"http": BASE, "pid": h.get("pid"), "ws_port": WS_PORT},
-               "extension": {"connected": h.get("extension"), **ext},
-               "tabs": len(tabs), "groups": len(groups)}
+               "extension": {"connected": bool(rows), "browsers": rows, "count": len(rows)},
+               "default": load_default_browser(),
+               "target": BROWSER,
+               "tabs": len(tabs) if ask else None,
+               "groups": len(groups) if ask else None}
 
         def human(o):
             d, e = o["daemon"], o["extension"]
             print(f"daemon      : pid {d['pid']}  http {d['http']}  ws :{d['ws_port']}")
-            print(f"extension   : {'connected' if e['connected'] else 'NOT connected'}"
-                  + (f"  v{e.get('version')}" if e.get("version") else ""))
-            if e.get("browser"):
-                print(f"browser     : {e['browser'][:90]}")
-            print(f"tabs/groups : {o['tabs']} tab(s), {o['groups']} group(s)")
             if not e["connected"]:
+                print("extension   : NOT connected")
                 print("\n-> load the extension: edge://extensions -> 开发人员模式 -> 加载解压缩的扩展 -> "
                       f"{os.path.join(HERE, 'extension')}")
+                return
+            print(f"extension   : {e['count']} browser(s) connected")
+            default = o["default"]
+            for r in e["browsers"]:
+                mark = "*" if default and r["instanceId"] == default else " "
+                label = f" ({r['label']})" if r.get("label") else ""
+                print(f"  {mark} {r['instanceId']:<14}{label:<18}v{r.get('version', '-'):<8}"
+                      f"{r.get('connectedFor', 0):.0f}s")
+            if e["count"] == 1:
+                print(f"tabs/groups : {o['tabs']} tab(s), {o['groups']} group(s)")
+            elif o["target"]:
+                print(f"target      : {o['target']} → {o['tabs']} tab(s), {o['groups']} group(s)")
+            else:
+                print(f"target      : ambiguous — pick one with `xb use <instance|label>` "
+                      f"or --browser (no tabs queried)")
         emit(out, j, human)
         return 0
 
@@ -821,7 +958,9 @@ def main(argv=None) -> int:
             state = "connected" if st.get("connected") else "NOT connected"
             t = st.get("totals") or {}
             w = st.get("worker") or {}
-            print(f"{st.get('name') or 'xb'} {st.get('version')}  bridge {state}  :{st.get('wsPort')}  "
+            print(f"{st.get('name') or 'xb'} {st.get('version')}  "
+                  f"[{st.get('instanceId') or '?'}{' · ' + st['label'] if st.get('label') else ''}]  "
+                  f"bridge {'connected' if st.get('connected') else 'NOT connected'}  :{st.get('wsPort')}  "
                   f"{t.get('tabs', 0)} tab(s), {t.get('marked', 0)} marked, {t.get('leased', 0)} leased"
                   f"  ·  worker boots {w.get('boots', 0)} cmds {w.get('cmds', 0)} errors {w.get('errors', 0)}"
                   f" faults {w.get('faults', 0)}")

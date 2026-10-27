@@ -3,3 +3,6 @@ test/dl/
 test/shot.png
 __pycache__/
 *.pyc
+test/.instance
+dist/
+test/store-page.png

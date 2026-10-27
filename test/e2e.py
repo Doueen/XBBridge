@@ -25,6 +25,22 @@ BASE = "http://127.0.0.1:8788"      # bridge HTTP endpoint (raw rpc for negative
 SHOT = os.path.join(HERE, "shot.png")
 DLDIR = os.path.join(HERE, "dl")
 
+# test/launch.py records the throw-away browser it started. Addressing it by
+# instance means the user's own Edge can stay connected without catching stray
+# commands (or losing its tabs to the test run).
+def _test_instance() -> str | None:
+    try:
+        with open(os.path.join(HERE, ".instance"), encoding="utf-8") as f:
+            value = f.read().strip()
+        return value or None
+    except OSError:
+        return None
+
+
+TARGET = _test_instance()
+BROWSER_ARGS = ["--browser", TARGET] if TARGET else []
+_KEEP = object()        # raw_rpc sentinel: "use the test browser"
+
 checks: list[tuple[str, bool, str]] = []
 HEALING = False
 
@@ -33,7 +49,8 @@ def xb(*argv, want_json=True, expect_fail=False):
     global HEALING
 
     def once():
-        cmd = [sys.executable, XB] + (["--json"] if want_json else []) + [str(a) for a in argv]
+        cmd = [sys.executable, XB] + BROWSER_ARGS + (["--json"] if want_json else []) \
+            + [str(a) for a in argv]
         return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                               errors="replace")
 
@@ -100,6 +117,15 @@ def window_sane(tab: int | None = None) -> None:
 
 
 def main() -> int:
+    # With several browsers reachable, never gamble on which one gets the
+    # commands: e2e must be pinned to the throw-away profile launch.py started.
+    listing = xb("browsers")
+    rows = (listing.get("instances") if isinstance(listing, dict) else []) or []
+    if len(rows) > 1 and not TARGET:
+        print(f"refusing to run: {len(rows)} browsers connected and no test/.instance — "
+              "start one with `python test/launch.py` first", file=sys.stderr)
+        return 2
+
     print("== status ==")
     st = xb("status")
     check("extension connected", st["extension"]["connected"], f"v{st['extension'].get('version')}")
@@ -324,8 +350,12 @@ def main() -> int:
             os.remove(p)
 
     print("== claims / generations ==")
-    def raw_rpc(cmd, args):
-        req = urllib.request.Request(f"{BASE}/rpc", data=json.dumps({"cmd": cmd, "args": args}).encode(),
+    def raw_rpc(cmd, args, browser=_KEEP):
+        payload = {"cmd": cmd, "args": args}
+        target = TARGET if browser is _KEEP else browser
+        if target:
+            payload["browser"] = target
+        req = urllib.request.Request(f"{BASE}/rpc", data=json.dumps(payload).encode(),
                                      method="POST", headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=20) as r:
@@ -392,7 +422,9 @@ def main() -> int:
     ap = xb("apis")
     check("apis reports namespaces", isinstance(ap.get("namespaces"), dict), f"{len(ap.get('namespaces') or {})} ns")
     logs = xb("logs", "-n", "3", want_json=False)
-    check("logs prints the daemon log", "bridge up" in logs or "extension" in logs, logs.splitlines()[-1][:40] if logs else "")
+    check("logs prints the daemon log",
+          "bridge up" in logs or "browser connected" in logs or "extension" in logs,
+          logs.splitlines()[-1][:40] if logs else "")
     xb("unmark", "--all")
 
     print("== background work ==")
@@ -421,6 +453,47 @@ def main() -> int:
     check("panel.unmark --all clears the rows",
           code == 200 and body["result"]["totals"]["marked"] == 0, str(body.get("result", {}).get("totals")))
     xb("close", bg)
+
+    print("== multi-browser ==")
+    listing = xb("browsers")
+    rows = listing.get("instances") if isinstance(listing, dict) else (listing or [])
+    ids = [r["instanceId"] for r in rows]
+    check("browsers lists every connected instance", bool(ids), f"{len(ids)}: {ids}")
+    if TARGET:
+        check("the launched test browser is addressable", TARGET in ids, TARGET)
+        lab = xb("label", "e2e-test")
+        check("label.set stores a label", lab.get("label") == "e2e-test", str(lab))
+        code, body = raw_rpc("ping", {}, browser="e2e-test")
+        check("a label resolves to its browser", code == 200 and body.get("ok") is True, str(code))
+        code, body = raw_rpc("ping", {}, browser="definitely-not-a-browser")
+        check("unknown browser -> browser_not_found (404)",
+              code == 404 and body.get("error", {}).get("code") == "browser_not_found",
+              f"{code} {body.get('error', {}).get('code')}")
+        xb("label", "")
+        lab2 = xb("panel")
+        check("label cleared", not lab2.get("label"), str(lab2.get("label")))
+    if len(ids) > 1:
+        code, body = raw_rpc("ping", {}, browser=None)
+        check("several browsers + no target -> browser_required (409)",
+              code == 409 and body.get("error", {}).get("code") == "browser_required",
+              f"{code} {body.get('error', {}).get('code')}")
+
+    print("== bridge hardening ==")
+    from websockets.sync.client import connect as ws_connect
+    try:
+        with ws_connect("ws://127.0.0.1:8787",
+                        additional_headers={"Origin": "https://evil.example"},
+                        open_timeout=3, close_timeout=2) as evil:
+            evil.send(json.dumps({"hello": {"role": "extension", "instanceId": "evil-origin"}}))
+            try:
+                evil.recv(timeout=2)
+            except Exception:
+                pass
+    except Exception:
+        pass    # a handshake refusal is the expected outcome
+    rows = [r["instanceId"] for r in (xb("browsers") or {}).get("instances", [])]
+    check("a website cannot register itself as a browser",
+          "evil-origin" not in rows and TARGET in rows, f"{len(rows)} instance(s)")
 
     print("== teardown ==")
     keeper = xb("open", f"{SITE}/gamma.html")["id"]

@@ -74,6 +74,13 @@ xb release --tab 12 | --all
 xb panel                                           # 与扩展工具栏面板同一份快照
 xb ext-reload                                      # 开发用：改完 manifest/图标后让扩展从磁盘重载
 
+# 多浏览器（日常 Edge + 测试 profile 可以同时在线，互不干扰）
+xb browsers                                        # 列出已连上的浏览器：实例 id / 标签 / 版本 / 在线时长
+xb label "日常"                                    # 给当前浏览器起个名（之后 --browser 日常 即可）
+xb use "日常"                                      # 把某个浏览器设为这个仓库的默认目标
+xb --browser 日常 open URL                          # 单次指定目标；也可用环境变量 XB_BROWSER
+xb --browser c7cae23ec8fc tabs                      # 实例 id 精确指定（测试脚本用这个）
+
 # 等待（bsk 的可靠性核心）
 xb wait-ms 500
 xb wait-for-element "#done" --state visible|hidden|attached|detached --timeout 15000
@@ -99,6 +106,23 @@ xb recent / xb restore [sessionId] / xb doctor / xb apis / xb logs -n 50
 ```
 
 所有命令加 `--json`（放在子命令前）输出机器可读结果；失败时 stdout 是 `{"ok":false,"error":{...}}`。
+
+## 多浏览器
+
+扩展在 `storage.local` 里存一个稳定的 `instanceId`，每次 hello 带上它（还有人可读的 label），
+桥按 id 建注册表。所以"你的日常 Edge"和"跑测试的一次性 profile"能同时连着：
+
+| 场景 | 行为 |
+|---|---|
+| 只连了一个浏览器 | `browser` 省略即可，自动用它 |
+| 连了多个、没指定目标 | 报 `browser_required`（HTTP 409 / exit 2），列出所有实例；不会瞎猜 |
+| `--browser <id或label>` | 精确匹配 id → 精确匹配 label → 唯一前缀；歧义报 `browser_ambiguous` |
+| label 打错 | `browser_not_found`（404 / exit 3） |
+| 目标浏览器中途关掉 | 只有发给它的 in-flight 调用被立刻唤醒（`extension_unavailable`），别的浏览器上的命令不受影响 |
+
+测试隔离：`python test/launch.py` 会把新 profile 的实例 id 写进 `test/.instance`，
+`test/e2e.py` 给每条命令都加 `--browser`；如果同时连着多个浏览器又找不到 `.instance`，
+e2e 直接拒绝运行（exit 2），避免误操作用户自己的窗口。
 
 ## 错误契约与退出码
 
@@ -158,13 +182,13 @@ xb recent / xb restore [sessionId] / xb doctor / xb apis / xb logs -n 50
 ```
 edge-agent/
   xb.py                     CLI（bsk 命令名 + 标签组 + 可见性 + 租约）
-  bridge/server.py          本地桥：WS ← 扩展，HTTP ← CLI（错误契约、断线即唤醒）
+  bridge/server.py          本地桥：WS ← 扩展（多实例注册表），HTTP ← CLI（错误契约、断线即唤醒）
   extension/manifest.json   MV3：tabs tabGroups windows scripting debugger sessions downloads …
   extension/sw.js           命令路由 + 注入函数 + 标记/租约/代际 + 面板快照
   extension/popup.html/.js  工具栏面板（受控标签、租约倒计时、一键切前台）
   test/site/*               自测站点（惰性元素/表单/下拉/上传/下载/拖拽/表格/console/network）
-  test/launch.py            起一个干净的测试 profile 并等扩展连上
-  test/e2e.py               78 项端到端断言
+  test/launch.py            起一个干净的测试 profile，并把它的实例 id 写进 test/.instance
+  test/e2e.py               85 项端到端断言（全部锚定 test/.instance 指定的浏览器）
   test/kill-edge.ps1        只杀带指定 profile 标记的 msedge
 ```
 
@@ -186,6 +210,42 @@ powershell -File test/kill-edge.ps1 -Match xb-try             # 清理
 
 命令覆盖：59 个声明子命令里 55 个被 e2e 实际调用；`request-help`（要人工点）、`restore`（会恢复已关标签）、
 `serve`/`stop`（会把跑测试用的守护进程停掉）属于**故意手工**。
+
+## 发布（Edge Add-ons）
+
+```bash
+python tools/build_store.py          # → dist/xb-bridge-<version>.zip（上传这个文件）
+python tools/make_store_shots.py --page test/store-page.png   # → docs/store/*.png
+```
+
+`build_store.py` 不只是打包，它还会：
+
+- 把 `sw.js` 里的 `const DEV_MODE = true` 改成 `false` —— 商店版无法让浏览器从磁盘重载扩展（`dev.reload` 返回 `unsupported_method`）
+- 拦下 `__pycache__`、`.git`、`test/`、`.DS_Store` 这类会被 Partner Center 拒绝的文件
+- 校验 manifest（MV3、description ≤ 132 字符、icons 16/32/48/128 全部存在）
+- 打印将要上传的每个文件与最终 zip 体积
+
+提交材料（可直接复制进 Partner Center）：`docs/STORE-LISTING.md`（属性、用途声明、逐条权限理由、远程代码声明、商店文案、审核测试说明）、`docs/PRIVACY.md`（隐私政策，托管后把 URL 填进去）。
+
+当前包的权限是裁剪过的 9 项：`tabs tabGroups windows scripting debugger alarms storage sessions downloads`
++ `host_permissions: <all_urls>`。`history` / `bookmarks` / `contextMenus` / `idle` / `offscreen` /
+`notifications` / `sidePanel` / `webNavigation` 这 8 项代码里零调用，已从 manifest 移除
+（申请了用不到的高危权限是商店最常见的打回原因）。
+
+**不想上架、只给自己/团队装**，不用审核，走企业策略：
+
+```
+Edge 策略：ExtensionSettings → 添加扩展 ID → installation_mode: force_installed
+           update_url: https://<你的服务器>/updates.xml   （crx 与 xml 同目录）
+```
+
+本机验证：
+
+```bash
+python xb.py browsers        # 实例 / 标签 / 版本 / 在线时长
+python xb.py panel           # 面板同一份快照（含未捕获异常计数）
+python test/e2e.py           # 87 项断言，全部锚定 test/.instance 指定的浏览器
+```
 
 ## 参考资料
 
