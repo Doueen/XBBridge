@@ -207,6 +207,84 @@ def mark_circle_x() -> Image.Image:
     return img
 
 
+THEMES = {
+    # tile top, tile bottom, stroke colour, hairline border
+    "teal":  ((45, 212, 191), (13, 122, 111), (255, 255, 255, 255), None),
+    "light": ((255, 255, 255), (233, 243, 243), (18, 165, 148, 255), (206, 224, 224, 255)),
+    "dark":  ((15, 23, 42), (8, 12, 22), (94, 234, 212, 255), None),
+}
+
+
+def deck_x(theme: str = "teal", ticks: int = 4, stroke_w: float = .105,
+           x_from: float = .30, x_to: float = .70) -> Image.Image:
+    """The chosen mark: an X whose descending stroke carries bridge-deck planks.
+
+    theme "teal"  -> the badge colour of candidate 1, white X, planks cut in the tile
+    theme "light" -> near-white tile, teal X
+    theme "dark"  -> the original candidate 10
+    """
+    top, bottom, ink, edge = THEMES[theme]
+    img = badge(top=top, bottom=bottom)
+    d = ImageDraw.Draw(img)
+    if edge:
+        d.rounded_rectangle([0, 0, S - 1, S - 1], radius=int(S * .26), outline=edge,
+                            width=max(2, int(S * .008)))
+    w = int(S * stroke_w)
+    stroke(d, [(S * x_from, S * x_from), (S * x_to, S * x_to)], w, ink)
+    stroke(d, [(S * x_to, S * x_from), (S * x_from, S * x_to)], w, ink)
+    if ticks:
+        thin = max(6, int(S * .022))
+        span = x_to - x_from
+        for k in range(ticks):
+            t = (k + 1) / (ticks + 1)
+            cx, cy = S * (x_from + span * t), S * (x_from + span * t)
+            # sample the tile gradient so the plank gap matches the background
+            ratio = max(0.0, min(1.0, cy / S))
+            notch = tuple(round(top[i] + (bottom[i] - top[i]) * ratio) for i in range(3)) + (255,)
+            d.line([(cx - w * .55, cy + w * .55), (cx + w * .55, cy - w * .55)],
+                   fill=notch, width=thin)
+    return img
+
+
+def build_icon(px: int, theme: str = "teal") -> Image.Image:
+    """Per-size art: at 16 px the plank ticks would just be noise."""
+    if px <= 16:
+        big = deck_x(theme=theme, ticks=0, stroke_w=.125)
+    elif px <= 32:
+        big = deck_x(theme=theme, ticks=2, stroke_w=.115)
+    else:
+        big = deck_x(theme=theme, ticks=4, stroke_w=.105)
+    return big.resize((px, px), Image.LANCZOS)
+
+
+def mark_deck_light() -> Image.Image:
+    """10L — light tile, teal X with deck ticks."""
+    return deck_x(theme="light")
+
+
+def mark_deck_light_clean() -> Image.Image:
+    """10L-c — same but no ticks: calmest at 16 px."""
+    return deck_x(theme="light", ticks=0)
+
+
+def mark_deck_light_tint() -> Image.Image:
+    """10L-b — light teal-tinted tile instead of near-white."""
+    img = badge(top=(240, 253, 250), bottom=(205, 235, 230))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([0, 0, S - 1, S - 1], radius=int(S * .26),
+                        outline=(178, 216, 210, 255), width=max(2, int(S * .008)))
+    w = int(S * .105)
+    stroke(d, [(S * .30, S * .30), (S * .70, S * .70)], w, (11, 122, 111, 255))
+    stroke(d, [(S * .70, S * .30), (S * .30, S * .70)], w, (11, 122, 111, 255))
+    thin = max(6, int(S * .022))
+    for k in range(4):
+        t = (k + 1) / 5
+        cx, cy = S * (.30 + .40 * t), S * (.30 + .40 * t)
+        d.line([(cx - w * .55, cy + w * .55), (cx + w * .55, cy - w * .55)],
+               fill=(228, 245, 242, 255), width=thin)
+    return img
+
+
 CANDIDATES = [
     ("1-badge-x", mark_badge_x),
     ("2-bridge", mark_bridge),
@@ -218,12 +296,29 @@ CANDIDATES = [
     ("8-disc-x", mark_circle_x),
     ("9-windows", mark_windows),
     ("10-deck-x", mark_deck_x),
+    ("10L-deck-light", mark_deck_light),
+    ("10Lb-deck-tint", mark_deck_light_tint),
+    ("10Lc-deck-clean", mark_deck_light_clean),
+    ("11-deck-teal", lambda: deck_x(theme="teal")),
 ]
+
+
+def install(theme: str = "teal") -> None:
+    """Write the chosen mark into extension/icons at every size the manifest lists."""
+    out = os.path.join(ROOT, "extension", "icons")
+    os.makedirs(out, exist_ok=True)
+    for px in (16, 32, 48, 128):
+        icon = build_icon(px, theme=theme)
+        path = os.path.join(out, f"icon-{px}.png")
+        icon.save(path)
+        print(f"  {os.path.basename(path):<14}{px}x{px}  {os.path.getsize(path):,} B")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(ROOT, "test", "icon-lab"))
+    ap.add_argument("--install", action="store_true",
+                    help="also write the chosen light deck mark into extension/icons")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -270,6 +365,9 @@ def main() -> int:
     print("  " + ", ".join(n for n, _ in CANDIDATES))
     print("  sheet:", os.path.join(args.out, "contact-sheet.png"),
           Image.open(os.path.join(args.out, "contact-sheet.png")).size)
+    if args.install:
+        print("installing the light deck mark into extension/icons:")
+        install(theme="teal")
     return 0
 
 

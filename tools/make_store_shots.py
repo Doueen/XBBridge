@@ -145,11 +145,14 @@ def xb(*argv: str) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--page", required=True, help="real screenshot taken via `xb screenshot`")
+    ap.add_argument("--page", help="real screenshot taken via `xb screenshot` (omit to skip shot 1)")
     args = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
 
-    shot_page(args.page, os.path.join(OUT, "shot-1-marked-tab.png"))
+    if args.page:
+        shot_page(args.page, os.path.join(OUT, "shot-1-marked-tab.png"))
+    else:
+        print("  shot-1 skipped (no --page)")
     shot_terminal("Every controlled tab, one glance",
                   "工具栏面板与 xb panel 同一份快照：谁被控制、租约还剩多久",
                   xb("panel"), os.path.join(OUT, "shot-2-cli.png"))

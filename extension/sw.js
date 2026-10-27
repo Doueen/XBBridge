@@ -594,10 +594,16 @@ async function onTarget(a, func, extraArgs) {
   let selector, frameId = 0;
   if (ref) { selector = refSelector(ref.i); frameId = ref.frameId; }
   else if (typeof raw === 'string' && raw.length) selector = raw;
-  else throw new Error('ref or selector required (e.g. @e12 or "#submit")');
+  else throw fail('invalid_params', 'ref or selector required (e.g. @e12 or "#submit")');
   const tab = await getTab(a.tabId, a);
-  const out = await inject(tab.id, func, [selector].concat(extraArgs || []), frameId);
-  if (out && out.error) throw new Error(out.error);
+  // Bounded: a page whose renderer stops answering must not hang the caller for
+  // the whole CLI timeout (seen on a tab that e2e had navigated and reloaded).
+  const out = await Promise.race([
+    inject(tab.id, func, [selector].concat(extraArgs || []), frameId),
+    timeoutAfter(Number(a.injectTimeout || 8000),
+      `the page stopped answering injected scripts (tab ${tab.id}) — reload the tab and retry`)
+  ]);
+  if (out && out.error) throw fail('target_not_found', out.error);
   return { tab, out, selector, frameId };
 }
 
@@ -953,13 +959,18 @@ function _fFavicon(o) {
   c.width = 32; c.height = 32;
   const g = c.getContext('2d');
   if (g) {
-    // same mark as the toolbar icon: teal disc with a rounded white X
-    g.fillStyle = p.color || '#0d9488';
-    g.beginPath(); g.arc(16, 16, 15, 0, Math.PI * 2); g.fill();
-    g.strokeStyle = '#ffffff';
-    g.lineWidth = 3.4;
+    // same mark as the toolbar icon: teal tile with a rounded white X
+    const ink = p.color || '#ffffff';
+    g.clearRect(0, 0, 32, 32);
+    const tile = () => { g.beginPath(); g.roundRect(0.5, 0.5, 31, 31, 9); };
+    tile();
+    const grad = g.createLinearGradient(0, 0, 0, 32);
+    grad.addColorStop(0, '#2dd4bf'); grad.addColorStop(1, '#0d7a6f');
+    g.fillStyle = grad; g.fill();
+    g.strokeStyle = ink;
+    g.lineWidth = 4.2;
     g.lineCap = 'round';
-    const arm = 7.2;
+    const arm = 7.4;
     g.beginPath();
     g.moveTo(16 - arm, 16 - arm); g.lineTo(16 + arm, 16 + arm);
     g.moveTo(16 + arm, 16 - arm); g.lineTo(16 - arm, 16 + arm);
