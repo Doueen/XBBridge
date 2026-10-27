@@ -823,7 +823,11 @@ def main(argv=None) -> int:
             w = st.get("worker") or {}
             print(f"{st.get('name') or 'xb'} {st.get('version')}  bridge {state}  :{st.get('wsPort')}  "
                   f"{t.get('tabs', 0)} tab(s), {t.get('marked', 0)} marked, {t.get('leased', 0)} leased"
-                  f"  ·  worker boots {w.get('boots', 0)} cmds {w.get('cmds', 0)} errors {w.get('errors', 0)}")
+                  f"  ·  worker boots {w.get('boots', 0)} cmds {w.get('cmds', 0)} errors {w.get('errors', 0)}"
+                  f" faults {w.get('faults', 0)}")
+            fault = w.get("lastFault")
+            if fault:
+                print(f"  last fault: {fault.get('kind')} — {str(fault.get('message'))[:120]}")
             rows = st.get("rows") or []
             if not rows:
                 print("(no tab is claimed or marked)")

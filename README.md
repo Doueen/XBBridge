@@ -20,7 +20,7 @@ bsk（[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)，MIT）�
 | **批量动作** `batch` | 一个来回跑最多 100 步，逐步返回结果；失败时 `outcome=applied` + `details.results`，调用方不会盲目重试造成重复提交 |
 | **错误契约** | 每个失败带 `code / outcome / retryable`，CLI 映射成稳定退出码 |
 | **租约与代际** `claim/release/leases` | 一个客户端认领标签后，别人动它就报 `tab_not_owned`；页面导航后 `expectGeneration` 过期报 `stale_generation`，避免在没看过的文档上乱点 |
-| **工具栏面板** | 点扩展图标就能看到"现在有哪些标签被控制/被租用"，每行可一键切到前台或取消标记；命令行侧同一份数据用 `xb panel` |
+| **工具栏面板** | 点扩展图标就能看到"现在有哪些标签被控制/被租用"，每行可一键切到前台或取消标记；命令行侧同一份数据用 `xb panel`（含 worker 重启次数与未捕获异常计数） |
 | **全页/裁剪/元素截图** | `--full`、`--clip x,y,w,h`、`--selector`、`--format jpeg --quality`，长边默认截到 2000 CSS px，dpr 折算进 scale，出图尺寸可断言 |
 
 ## 安装（一次性）
@@ -29,7 +29,7 @@ bsk（[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)，MIT）�
 # 1) 扩展：必须选 edge-agent\extension 这一层，不是仓库根目录
 edge://extensions  ->  开发人员模式  ->  加载解压缩的扩展  ->  C:\WorkSpace\HermesWorkSpace\edge-agent\extension
 # 2) 自检
-python xb.py status      # 期望：extension: connected  v0.3.1
+python xb.py status      # 期望：extension: connected  v0.3.2
 ```
 
 > 扩展在 Edge 里显示为 **xb bridge**（teal 圆角方块 + 白色 X，和受控标签的 favicon 是同一个符号）。
@@ -150,7 +150,8 @@ xb recent / xb restore [sessionId] / xb doctor / xb apis / xb logs -n 50
 10. **MV3 CSP 禁 `eval`**：`eval`/`screenshot`/`hover`/`press`/`console`/`network` 都走 debugger，首次会弹「xb began debugging」提示条。
 11. **`edge://`、扩展页、Web Store 不可注入**；`group close` 关掉窗口最后几个标签会让浏览器退出。
 12. **SW 休眠**：keepalive alarm（30s）+ 断线指数退避（0.8s→15s）；浏览器晚于守护进程启动时，最多等一个 alarm 周期才连上。
-13. **改完 `extension/sw.js` 必须换新 profile 重启浏览器**：unpacked 扩展不热重载；同一 profile 二次启动时命令行 `--load-extension` 有时不生效，用 `test/launch.py` 每次开新 profile 最稳。
+13. **扩展卡片的"错误"按钮会保留历史记录**：`edge://extensions` 上出现红色"错误"不一定代表现在有问题——先看 `xb panel` 的 `faults`/`last fault`（worker 用 `error`/`unhandledrejection` 自己记录未捕获异常）。确认是历史记录后，点"错误 → 全部清除"抹掉即可。
+14. **改完 `extension/sw.js` 必须换新 profile 重启浏览器**：unpacked 扩展不热重载；同一 profile 二次启动时命令行 `--load-extension` 有时不生效，用 `test/launch.py` 每次开新 profile 最稳。
 
 ## 结构
 

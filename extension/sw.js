@@ -20,6 +20,24 @@ let stats = { connectedAt: null, lastCmdAt: null, cmds: 0, errors: 0, boots: 0, 
 
 const log = (...a) => console.log('[xb]', ...a);
 
+/* Uncaught failures never reach a command reply, so they used to disappear into
+ * the browser's extension error list. Record them where `xb panel` can show them. */
+function recordFault(kind, message) {
+  const text = String(message === undefined ? kind : message).slice(0, 300);
+  stats.faults = (stats.faults || 0) + 1;
+  stats.lastFault = { kind, message: text, at: Date.now() };
+  try {
+    chrome.storage.session.set({ xbLastFault: stats.lastFault }).catch(() => {});
+  } catch (e) { /* best effort */ }
+  log('fault', kind, text);
+}
+
+self.addEventListener('error', (e) => recordFault('error', (e && (e.message || e.error)) || 'unknown error'));
+self.addEventListener('unhandledrejection', (e) => {
+  const r = e && e.reason;
+  recordFault('rejection', (r && (r.message || r)) || 'unhandled rejection');
+});
+
 /* --------------------------------------------------------------- errors */
 
 /*
@@ -272,7 +290,8 @@ async function panelState() {
     connected: !!(ws && ws.readyState === WebSocket.OPEN),
     wsPort: WS_PORT,
     totals: { tabs: all.length, marked: MARKS.size, leased: LEASES.size },
-    worker: { boots: stats.boots, cmds: stats.cmds, errors: stats.errors, lastError: stats.lastError },
+    worker: { boots: stats.boots, cmds: stats.cmds, errors: stats.errors,
+              faults: stats.faults || 0, lastFault: stats.lastFault || null, lastError: stats.lastError },
     debugger: Array.from(DBG.entries()).map(([tabId, s]) => ({
       tabId, attached: !!s.attached, console: s.console.length, network: s.network.length
     })),
@@ -2459,8 +2478,9 @@ restoreMarks().catch(() => {});
 /* count worker boots so a silent restart storm is visible in `xb panel` */
 (async () => {
   try {
-    const got = await chrome.storage.session.get('xbBoots');
+    const got = await chrome.storage.session.get(['xbBoots', 'xbLastFault']);
     stats.boots = Number(got.xbBoots || 0) + 1;
+    if (got.xbLastFault) stats.lastFault = got.xbLastFault;   // survives a restart
     await chrome.storage.session.set({ xbBoots: stats.boots });
   } catch (e) { /* storage is best-effort */ }
 })();

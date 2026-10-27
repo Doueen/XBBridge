@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "xb bridge",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "让你的 AI agent 在自己的标签页里干活：受控标签有可见标记，租约防止互相抢，动作可批量下发。命令行：xb",
   "minimum_chrome_version": "116",
   "icons": {
