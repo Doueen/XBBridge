@@ -136,3 +136,48 @@
 > 5. The extension never contacts a remote host. Its only socket is
 >    `ws://127.0.0.1:8787`, and the daemon refuses WebSocket handshakes that carry an
 >    `http(s)://` origin, so a website cannot impersonate the extension.
+
+---
+
+## 提交记录（2026-10-27）
+
+| 项 | 值 |
+|---|---|
+| 状态 | **In review**（Microsoft 审核中，官方说明 7 个工作日内出结果） |
+| 版本 | 0.3.4 |
+| Product ID | `9865aa85-56ab-4717-9c18-d57886d7f407` |
+| Store ID | `0RDCKCZKMWH2` |
+| CRX ID | `fdhphelkbllilnniggopgdkmbfabgngo` |
+| Category | Developer Tools |
+| Visibility | Public（241/241 市场） |
+| Languages | English (United States) |
+| 包 | `XBBridge-0.3.4.zip`（9 权限 + `<all_urls>`） |
+
+审核表单的选择：**"Yes, I need to provide credentials, accounts, or other info for testers"** —— 不是要账号，而是测试者必须知道要先起本地守护进程，否则只会看到"未连接"。认证备注（1959/2000 字符）原文如下：
+
+```
+NO CREDENTIALS ARE NEEDED. XBBridge is a client: it needs the companion "xb" daemon (open source, Python 3.9+) running on the same machine, and it does nothing on its own.
+
+Why: the extension lets a local command-line agent drive the user's own browser tabs. The daemon is the agent side, the extension is the browser side. Without it, the popup honestly reports "bridge not connected" and no page is read.
+
+How to test the functionality:
+1) Install and click the toolbar icon: it reports the bridge is not connected (expected).
+2) Start the daemon per the project README linked from the support contact: python xb.py serve
+3) Run: python xb.py open https://example.com
+   A tab opens in the CURRENT window, inside a group named XBBridge, with a teal frame, a label chip at the bottom-left and the XBBridge favicon; the popup lists the controlled tab.
+4) python xb.py panel lists controlled tabs; python xb.py group close XBBridge cleans up.
+
+Where each permission is used:
+- tabs, tabGroups, windows: open/group/focus/close tabs, read window bounds and minimized state
+- scripting: the pointer-events:none control overlay, and text snapshots the user asks for
+- alarms: 15s service-worker keep-alive so a later command does not hang
+- storage: local instance id, tab-mark table, lease tokens (never uploaded)
+- sessions: sessions.recent, only when the user runs it
+- downloads: the download command only
+- debugger: only by "click --trusted", to dispatch real mouse events on pages that ignore synthetic ones; no page data is read through it
+- host <all_urls>: the user picks the page at run time; nothing is read until a command targets that tab
+
+No remote code, no eval, no telemetry. The only socket is a loopback WebSocket to ws://127.0.0.1:8787, and the daemon rejects handshakes carrying an http(s) origin, so a website cannot impersonate the extension. "dev.reload" (self-reload from disk) is compiled out of this build and returns unsupported_method.
+```
+
+> 后续更新版本时：改 manifest 版本号 → `python tools/build_store.py` → Packages 页 Replace 上传 → Store listings 若图标/文案有变则重传 → Publish 提交（每次都要重新填认证备注）。
