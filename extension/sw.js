@@ -45,6 +45,7 @@ class XbError extends Error {
 function fail(code, message, opts) { return new XbError(code, message, opts); }
 
 const ERROR_PATTERNS = [
+  [/viewport is 0x0|window is minimized/i, 'window_minimized'],
   [/unknown command/i, 'unsupported_method'],
   [/no active tab/i, 'no_target_tab'],
   [/No tab with id|Invalid tab ID|tab was closed|Tab not found/i, 'no_target_tab'],
@@ -153,14 +154,69 @@ async function handle(msg) {
 
 /* ---------------------------------------------------------------- helpers */
 
-async function getTab(tabId) {
+async function getTab(tabId, guardArgs) {
+  let tab;
   if (tabId === undefined || tabId === null) {
     const [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (!t) throw new Error('no active tab');
-    return t;
+    tab = t;
+  } else {
+    tab = await chrome.tabs.get(Number(tabId));
   }
-  return await chrome.tabs.get(Number(tabId));
+  if (guardArgs) guardTab(tab, guardArgs);
+  return tab;
 }
+
+/* ---- generations and leases ----
+ * A generation is bumped whenever the tab navigates. A caller that pins
+ * expectGeneration gets stale_generation instead of acting on a document it
+ * never inspected. A lease says "this tab is mine right now": other callers are
+ * refused until it expires or is released.
+ */
+const GEN = new Map();        // tabId -> navigation counter
+const LEASES = new Map();     // tabId -> {token, label, generation, claimedAt, expiresAt}
+const LEASE_TTL_MS = 2 * 60 * 1000;
+
+function bumpGeneration(tabId) {
+  GEN.set(tabId, (GEN.get(tabId) || 0) + 1);
+  return GEN.get(tabId);
+}
+
+function generationOf(tabId) { return GEN.get(tabId) || 0; }
+
+function leaseView(tabId, l) {
+  return { tabId, token: l.token, label: l.label || '', generation: l.generation,
+           ageMs: Date.now() - l.claimedAt, expiresInMs: Math.max(0, l.expiresAt - Date.now()) };
+}
+
+function guardTab(tab, a) {
+  const args = a || {};
+  const lease = LEASES.get(Number(tab.id));
+  if (lease) {
+    if (args.lease !== lease.token) {
+      throw fail('tab_not_owned',
+        `tab ${tab.id} is claimed by another client${lease.label ? ' (' + lease.label + ')' : ''}; `
+        + 'release it or pass its lease token', {});
+    }
+    lease.expiresAt = Date.now() + LEASE_TTL_MS;
+  }
+  if (args.expectGeneration !== undefined && Number(args.expectGeneration) !== generationOf(tab.id)) {
+    throw fail('stale_generation',
+      `tab ${tab.id} navigated since generation ${args.expectGeneration} `
+      + `(now ${generationOf(tab.id)}); re-inspect before acting`, {});
+  }
+  return tab;
+}
+
+function reclaimLeases() {
+  const now = Date.now();
+  for (const [tabId, lease] of Array.from(LEASES.entries())) {
+    if (lease.expiresAt > now) continue;
+    LEASES.delete(tabId);
+    clearMark(tabId).catch(() => {});
+  }
+}
+setInterval(reclaimLeases, 15 * 1000);
 
 function shapeTab(t) {
   return {
@@ -172,6 +228,7 @@ function shapeTab(t) {
     pinned: !!t.pinned,
     audible: !!t.audible,
     status: t.status,
+    generation: generationOf(t.id),
     title: t.title,
     url: t.url
   };
@@ -316,6 +373,7 @@ async function withDebugger(tabId, fn, keepAttached) {
 
 async function inject(tabId, func, args, frameId) {
   const tab = await getTab(tabId);
+  if (tab.discarded) throw fail('tab_discarded', `tab ${tab.id} is discarded (sleeping); reload it first`);
   const target = { tabId: tab.id };
   if (frameId !== undefined && frameId !== null && Number(frameId) !== 0) target.frameIds = [Number(frameId)];
   const res = await chrome.scripting.executeScript({
@@ -333,6 +391,26 @@ async function inject(tabId, func, args, frameId) {
 /* ---- v0.2 additions: refs, rects, waits, keys, buffers, frames ---- */
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function timeoutAfter(ms, message) {
+  return sleep(ms).then(() => { throw fail('timeout', message, { retryable: true }); });
+}
+
+/* Injections into a discarded or privileged page can never resolve; bound them so
+ * cosmetic work (markers, pulses) can never hang a command. */
+async function safeInject(tabId, func, args, frameId, ms) {
+  try {
+    const tab = await chrome.tabs.get(Number(tabId));
+    if (tab.discarded) return null;
+    if (/^(chrome|edge|about|devtools|view-source|extension):/i.test(tab.url || '')) return null;
+    return await Promise.race([
+      inject(tabId, func, args, frameId),
+      timeoutAfter(ms === undefined ? 4000 : ms, 'the page did not answer an injected helper')
+    ]);
+  } catch (e) {
+    return null;
+  }
+}
 
 /* refs: "@e12" (main frame) or "@e12f4711" (frame 4711), or a plain css selector */
 function parseRef(ref) {
@@ -390,7 +468,7 @@ async function onTarget(a, func, extraArgs) {
   if (ref) { selector = refSelector(ref.i); frameId = ref.frameId; }
   else if (typeof raw === 'string' && raw.length) selector = raw;
   else throw new Error('ref or selector required (e.g. @e12 or "#submit")');
-  const tab = await getTab(a.tabId);
+  const tab = await getTab(a.tabId, a);
   const out = await inject(tab.id, func, [selector].concat(extraArgs || []), frameId);
   if (out && out.error) throw new Error(out.error);
   return { tab, out, selector, frameId };
@@ -460,6 +538,9 @@ function _fScrollTo(sel) {
 }
 
 function _fBox(sel) {
+  if (window.innerWidth === 0 || window.innerHeight === 0) {
+    return { error: 'viewport is 0x0 — the browser window is minimized or collapsed; restore it before using coordinates' };
+  }
   const el = document.querySelector(sel);
   if (!el) return { error: 'element not found: ' + sel };
   el.scrollIntoView({ block: 'center', inline: 'center' });
@@ -548,6 +629,9 @@ function _fCenter() { return { x: Math.round(window.innerWidth / 2), y: Math.rou
 /* Scroll to the element, then report where it really is and whether a real
  * mouse event at that point would actually land on it. */
 function _fTrustedBox(sel) {
+  if (window.innerWidth === 0 || window.innerHeight === 0) {
+    return { error: 'viewport is 0x0 — the browser window is minimized or collapsed; restore it before using coordinates' };
+  }
   const el = document.querySelector(sel);
   if (!el) return { error: 'element not found: ' + sel };
   el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
@@ -760,16 +844,14 @@ async function restoreMarks() {
 }
 
 async function paintMark(tabId, label) {
-  const out = await inject(tabId, _fMark, [{ label: label || '' }]);
-  try { await inject(tabId, _fFavicon, [{}]); } catch (e) { /* favicon is cosmetic */ }
+  const out = await safeInject(tabId, _fMark, [{ label: label || '' }]);
+  await safeInject(tabId, _fFavicon, [{}]);
   return out;
 }
 
 async function clearMark(tabId) {
-  try {
-    await inject(tabId, _fUnmark, []);
-    await inject(tabId, _fFavicon, [{ off: true }]);
-  } catch (e) { /* page may be gone or restricted */ }
+  await safeInject(tabId, _fUnmark, []);
+  await safeInject(tabId, _fFavicon, [{ off: true }]);
   MARKS.delete(tabId);
   await persistMarks();
 }
@@ -795,9 +877,9 @@ async function ensureMark(tabId, label) {
 
 async function pulseAt(tabId, selector, frameId) {
   try {
-    const box = await inject(tabId, _fBox, [selector], frameId);
+    const box = await safeInject(tabId, _fBox, [selector], frameId);
     if (box && !box.error) {
-      await inject(tabId, _fPulse, [{ x: box.x, y: box.y, w: box.w, h: box.h }]);
+      await safeInject(tabId, _fPulse, [{ x: box.x, y: box.y, w: box.w, h: box.h }]);
     }
   } catch (e) { /* a pulse must never fail the action */ }
 }
@@ -1109,7 +1191,7 @@ const COMMANDS = {
 
   async navigate(a) {
     if (!a.url) throw new Error('url required');
-    const tab = await getTab(a.tabId);
+    const tab = await getTab(a.tabId, a);
     await chrome.tabs.update(tab.id, { url: a.url });
     return { tabId: tab.id, url: a.url };
   },
@@ -1203,7 +1285,7 @@ const COMMANDS = {
     const ref = parseRef(raw);
     const selector = ref ? refSelector(ref.i) : raw;
     if (!selector) throw new Error('ref or selector required');
-    const tab = await getTab(a.tabId);
+    const tab = await getTab(a.tabId, a);
     if (a.flash !== false) await pulseAt(tab.id, selector, ref ? ref.frameId : 0);
     const marked = a.noMark === true ? null : await ensureMark(tab.id, a.markLabel).catch(() => null);
     if (a.trusted === true) {
@@ -1240,7 +1322,7 @@ const COMMANDS = {
   },
 
   async drag(a) {
-    const tab = await getTab(a.tabId);
+    const tab = await getTab(a.tabId, a);
     let from;
     if (typeof a.from === 'string' && !/^\s*-?\d+(?:\.\d+)?\s*,/.test(a.from)) {
       const ref = parseRef(a.from);
@@ -1280,7 +1362,7 @@ const COMMANDS = {
     const ref = parseRef(raw);
     const selector = ref ? refSelector(ref.i) : raw;
     if (!selector) throw new Error('ref or selector required');
-    const tab = await getTab(a.tabId);
+    const tab = await getTab(a.tabId, a);
     if (a.flash !== false) await pulseAt(tab.id, selector, ref ? ref.frameId : 0);
     const marked = a.noMark === true ? null : await ensureMark(tab.id, a.markLabel).catch(() => null);
     const out = await inject(tab.id, _fFillSel, [selector, a.text === undefined ? '' : String(a.text)], ref ? ref.frameId : 0);
@@ -1372,7 +1454,7 @@ const COMMANDS = {
   async press(a) {
     const keys = a.keys !== undefined ? a.keys : a.key;
     if (!keys) throw new Error('keys required (e.g. "Enter", "Control+A")');
-    const tab = await getTab(a.tabId);
+    const tab = await getTab(a.tabId, a);
     if (a.ref !== undefined || a.selector !== undefined) {
       await onTarget(a, _fFocus, [true]).catch(() => {});
     }
@@ -1398,7 +1480,7 @@ const COMMANDS = {
     if (typeof raw !== 'string' || !raw.length) throw new Error('ref or selector of the file input required');
     const ref = parseRef(raw);
     const selector = ref ? refSelector(ref.i) : raw;
-    const tab = await getTab(a.tabId);
+    const tab = await getTab(a.tabId, a);
     const marked = await markTab(tab, a);
     return await withDebugger(tab.id, async (t) => {
       const doc = await chrome.debugger.sendCommand(t, 'DOM.getDocument', { depth: -1, pierce: true });
@@ -1622,7 +1704,8 @@ const COMMANDS = {
     for (const [tabId, m] of MARKS.entries()) {
       let live = null;
       if (a.live !== false) {
-        try { live = await inject(tabId, _fMarkState, []); } catch (e) { live = { error: 'unreachable' }; }
+        live = await safeInject(tabId, _fMarkState, []);
+        if (live === null) live = { error: 'unreachable' };
       }
       rows.push({ ...markView(tabId, m), overlay: live });
     }
@@ -1687,6 +1770,53 @@ const COMMANDS = {
       if (a.intervalMs) await sleep(Number(a.intervalMs));
     }
     return { steps: steps.length, applied: results.filter((r) => r.ok).length, results };
+  },
+
+  /* ---- claims: who owns this tab right now ---- */
+
+  async 'tab.claim'(a) {
+    const tab = await getTab(a.tabId);
+    const generation = generationOf(tab.id);
+    if (a.generation !== undefined && Number(a.generation) !== generation) {
+      throw fail('stale_generation',
+        `tab ${tab.id} moved on since generation ${a.generation} (now ${generation}); list tabs again`, {});
+    }
+    const existing = LEASES.get(tab.id);
+    if (existing && a.token !== undefined && existing.token !== a.token) {
+      throw fail('tab_not_owned',
+        `tab ${tab.id} is already claimed${existing.label ? ' (' + existing.label + ')' : ''}`, {});
+    }
+    const ttl = Math.max(5000, Math.min(30 * 60 * 1000, Number(a.ttlMs || LEASE_TTL_MS)));
+    const lease = {
+      token: a.token !== undefined ? String(a.token) : (crypto.randomUUID ? crypto.randomUUID() : String(Date.now())),
+      label: a.label === undefined ? (existing ? existing.label : '') : String(a.label),
+      generation,
+      claimedAt: existing ? existing.claimedAt : Date.now(),
+      expiresAt: Date.now() + ttl
+    };
+    LEASES.set(tab.id, lease);
+    const marked = await ensureMark(tab.id, lease.label).catch(() => null);
+    return { ...leaseView(tab.id, lease), generation, marked: !!marked };
+  },
+
+  async 'tab.release'(a) {
+    if (a.all === true) {
+      const ids = Array.from(LEASES.keys());
+      for (const id of ids) {
+        LEASES.delete(id);
+        await clearMark(id);
+      }
+      return { released: ids };
+    }
+    const tab = await getTab(a.tabId);
+    const had = LEASES.delete(tab.id);
+    if (had) await clearMark(tab.id);
+    return { released: had ? [tab.id] : [] };
+  },
+
+  async 'lease.list'() {
+    reclaimLeases();
+    return Array.from(LEASES.entries()).map(([tabId, l]) => leaseView(tabId, l));
   },
 
   /* ---- Chromium/Edge extras ---- */
@@ -1842,7 +1972,7 @@ const COMMANDS = {
 
   async 'tab.navigate'(a) {
     if (!a.url) throw new Error('url required');
-    const tab = await getTab(a.tabId);
+    const tab = await getTab(a.tabId, a);
     await chrome.tabs.update(tab.id, { url: a.url });
     return { tabId: tab.id, url: a.url };
   },
@@ -2116,12 +2246,15 @@ chrome.action.onClicked.addListener(() => { backoff = RECONNECT_MIN; connect(); 
 
 /* a mark dies with its tab, and an overlay dies with its document: repaint */
 chrome.tabs.onRemoved.addListener((tabId) => {
+  LEASES.delete(tabId);
+  GEN.delete(tabId);
   if (!MARKS.has(tabId)) return;
   MARKS.delete(tabId);
   persistMarks().catch(() => {});
 });
 
 chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === 'loading' || typeof info.url === 'string') bumpGeneration(tabId);
   if (info.status !== 'complete') return;
   const m = MARKS.get(tabId);
   if (!m) return;

@@ -14,20 +14,41 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 XB = os.path.join(ROOT, "xb.py")
 SITE = "http://127.0.0.1:8899"
+BASE = "http://127.0.0.1:8788"      # bridge HTTP endpoint (raw rpc for negative tests)
 SHOT = os.path.join(HERE, "shot.png")
 DLDIR = os.path.join(HERE, "dl")
 
 checks: list[tuple[str, bool, str]] = []
+HEALING = False
 
 
 def xb(*argv, want_json=True, expect_fail=False):
-    cmd = [sys.executable, XB] + (["--json"] if want_json else []) + [str(a) for a in argv]
-    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    global HEALING
+
+    def once():
+        cmd = [sys.executable, XB] + (["--json"] if want_json else []) + [str(a) for a in argv]
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace")
+
+    p = once()
+    # a window that got minimized mid-run makes every coordinate command fail or
+    # hang; heal it and give the command one more chance before asserting
+    if not HEALING and p.returncode in (3, 4):
+        HEALING = True
+        try:
+            window_sane()
+        except Exception:
+            pass
+        finally:
+            HEALING = False
+        p = once()
     if expect_fail:
         return p.returncode, p.stdout + p.stderr
     if p.returncode != 0:
@@ -57,20 +78,25 @@ def xb_error(*argv):
     return rc, payload.get("error") or {}
 
 
-def window_sane() -> None:
-    """An offscreen (-10000) window degenerates to a 0x0 viewport on Edge 155.
+def window_sane(tab: int | None = None) -> None:
+    """A minimized window reports a 0x0 viewport on Edge 155.
 
     Every rect-based command then fails for reasons unrelated to the bridge, so
-    heal the test window before asserting anything.
+    restore the window (and lay the given tab out) before asserting anything.
     """
-    tabs = xb("tabs")
-    if not tabs:
-        return
-    tab = tabs[0]["id"]
-    w = xb("eval", "innerWidth", "--tab", tab)["value"]
-    if not w:
-        xb("window-resize", "--width", 1200, "--height", 800, "--left", 120, "--top", 80, "--state", "normal")
-        xb("wait-ms", 300)
+    for _ in range(3):
+        wins = xb("windows")
+        normal = any(w.get("state") == "normal" for w in wins)
+        target = tab
+        if target is None:
+            tabs = xb("tabs")
+            target = next((t["id"] for t in tabs if t["active"]), tabs[0]["id"] if tabs else None)
+        if normal and target is not None and xb("eval", "innerWidth", "--tab", target)["value"]:
+            return
+        xb("window-resize", "--state", "normal", "--width", 1200, "--height", 800, "--left", 120, "--top", 80)
+        if target is not None:
+            xb("tab-select", target, "--no-focus")
+        xb("wait-ms", 400)
 
 
 def main() -> int:
@@ -81,6 +107,7 @@ def main() -> int:
 
     print("== navigation + waits ==")
     tab = xb("open", f"{SITE}/app.html")["id"]
+    window_sane(tab)
     xb("wait-ms", 300)
     w = xb("wait-for-element", "#btn-slow", "--tab", tab, "--timeout", 8000)
     check("wait-for-element finds an existing element", w["ms"] >= 0, f"{w['ms']}ms")
@@ -232,6 +259,7 @@ def main() -> int:
     check("acting on a tab marks it automatically", auto is True, str(auto))
     xb("unmark", "--all")
 
+    window_sane()
     print("== drag / trusted click ==")
     knob_before = xb("eval", "document.getElementById('knobout').textContent", "--tab", tab)["value"]
     dr = xb("drag", "#knob", "300,300", "--tab", tab, "--steps", 8, "--duration", 200)
@@ -261,6 +289,7 @@ def main() -> int:
           f"rc={rc} outcome={err.get('outcome')}")
     os.remove(steps)
 
+    window_sane()
     print("== capture geometry ==")
     vp = xb("eval", "JSON.stringify([innerWidth, innerHeight, "
                     "document.documentElement.scrollHeight])", "--tab", tab)["value"]
@@ -293,6 +322,38 @@ def main() -> int:
         p = os.path.join(HERE, f)
         if os.path.exists(p):
             os.remove(p)
+
+    print("== claims / generations ==")
+    def raw_rpc(cmd, args):
+        req = urllib.request.Request(f"{BASE}/rpc", data=json.dumps({"cmd": cmd, "args": args}).encode(),
+                                     method="POST", headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return 200, json.loads(r.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    gens = {t["id"]: t.get("generation") for t in xb("tabs")}
+    check("tab.list exposes a generation", gens.get(tab) is not None, str(gens.get(tab)))
+    cl = xb("claim", "--tab", tab, "--label", "e2e claim")
+    check("claim returns a token and marks the tab", bool(cl.get("token")) and cl.get("marked") is True,
+          f"gen {cl.get('generation')}")
+    code, body = raw_rpc("click", {"tabId": tab, "selector": "#q"})
+    check("a caller without the lease is refused", code == 409 and body.get("error", {}).get("code") == "tab_not_owned",
+          f"http {code}")
+    xb("fill", "#q", "with-lease", "--tab", tab)
+    got = xb("eval", "document.getElementById('q').value", "--tab", tab)["value"]
+    check("the claiming client keeps working", got == "with-lease", str(got))
+    gen_before = cl["generation"]
+    xb("navigate", f"{SITE}/app.html", "--tab", tab)
+    xb("wait-for-element", "#q", "--tab", tab, "--timeout", 8000)
+    token = cl["token"]
+    code, body = raw_rpc("click", {"tabId": tab, "selector": "#q", "lease": token, "expectGeneration": gen_before})
+    check("a navigation invalidates the pinned generation",
+          code == 409 and body.get("error", {}).get("code") == "stale_generation", f"http {code}")
+    xb("release", "--all")
+    code, body = raw_rpc("click", {"tabId": tab, "selector": "#q"})
+    check("release frees the tab again", code == 200, f"http {code}")
 
     print("== teardown ==")
     keeper = xb("open", f"{SITE}/gamma.html")["id"]

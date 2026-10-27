@@ -33,6 +33,7 @@ JSON_MODE = False
 EXIT_BY_CODE = {
     "invalid_params": 2, "unsupported_method": 2,
     "no_target_tab": 3, "extension_unavailable": 3, "unavailable": 3, "bridge_unavailable": 3,
+    "window_minimized": 3,
     "timeout": 4,
     "target_not_found": 5, "restricted_page": 5,
     "stale_generation": 6, "tab_not_owned": 6, "claim_required": 6, "batch_failed": 6,
@@ -115,6 +116,11 @@ def ensure_daemon(quiet: bool = False) -> None:
 
 def rpc(cmd: str, args: dict | None = None, timeout: float = 60.0):
     args = {k: v for k, v in (args or {}).items() if v is not None}  # never send nulls
+    tab_id = args.get("tabId")
+    if tab_id is not None and "lease" not in args:
+        token = load_leases().get(str(tab_id))
+        if token:
+            args["lease"] = token
     ensure_daemon(quiet=True)
     try:
         res = http("/rpc", {"cmd": cmd, "args": args or {}, "timeout": timeout}, timeout=timeout + 5)
@@ -159,6 +165,26 @@ def ids(spec: str) -> list[int]:
 
 def csv_list(spec: str) -> list[str]:
     return [x.strip() for x in str(spec).split(",") if x.strip()]
+
+
+# ------------------------------------------------------------------- leases
+def _lease_path() -> str:
+    return os.path.join(HERE, ".xb", "leases.json")
+
+
+def load_leases() -> dict:
+    try:
+        with open(_lease_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_leases(data: dict) -> None:
+    os.makedirs(os.path.dirname(_lease_path()), exist_ok=True)
+    with open(_lease_path(), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 # -------------------------------------------------------------------- render
@@ -384,6 +410,14 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("--x", type=int); pu.add_argument("--y", type=int)
     pu.add_argument("--no-mark", action="store_true", dest="no_mark")
     pu.add_argument("--mark-label", dest="mark_label")
+
+    # claims
+    cl = sub.add_parser("claim", help="claim a tab so other callers cannot drive it")
+    cl.add_argument("--tab", type=int); cl.add_argument("--label", default="")
+    cl.add_argument("--ttl", type=int, default=None, help="lease TTL in seconds")
+    rl = sub.add_parser("release", help="release a claim (and its marker)")
+    rl.add_argument("--tab", type=int); rl.add_argument("--all", action="store_true")
+    sub.add_parser("leases", help="list active claims")
 
     return p
 
@@ -742,6 +776,33 @@ def main(argv=None) -> int:
                            "noMark": True if args.no_mark else None,
                            "markLabel": args.mark_label}), j,
              lambda r: print(f"pulse at {r['x']},{r['y']}"))
+
+    # ---- claims ----
+    elif args.cmd == "claim":
+        ttl_ms = None if args.ttl is None else args.ttl * 1000
+        r = rpc("tab.claim", {"tabId": tab, "label": args.label, "ttlMs": ttl_ms})
+        leases = load_leases()
+        leases[str(r["tabId"])] = r["token"]
+        save_leases(leases)
+        emit(r, j, lambda rr: print(f"claimed tab {rr['tabId']} (gen {rr['generation']}, "
+                                    f"expires in {rr['expiresInMs'] // 1000}s) token={rr['token'][:8]}…"))
+    elif args.cmd == "release":
+        r = rpc("tab.release", {"tabId": tab, "all": True if args.all else None})
+        leases = load_leases()
+        for tid in r.get("released") or []:
+            leases.pop(str(tid), None)
+        save_leases(leases)
+        emit(r, j, lambda rr: print("released: " + (", ".join(map(str, rr.get("released") or [])) or "(nothing claimed)")))
+    elif args.cmd == "leases":
+        rows = rpc("lease.list", {})
+        if j:
+            print(json.dumps(rows, ensure_ascii=False, indent=2))
+        elif not rows:
+            print("(no active claims)")
+        else:
+            for l in rows:
+                print(f"{l['tabId']:>7}  {l['expiresInMs'] // 1000:>4}s  gen {l['generation']:<4} "
+                      f"{(l.get('label') or '(unlabelled)')[:50]}")
     return 0
 
 
