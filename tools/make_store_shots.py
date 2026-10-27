@@ -77,22 +77,25 @@ def rounded(img: Image.Image, radius: int = 14) -> Image.Image:
 
 
 def shot_page(page_path: str, out_path: str) -> None:
+    """Big, readable page shot: the capture fills the frame, caption in a band."""
     page = Image.open(page_path).convert("RGB")
-    # fit into the 1280 x 560 content area, keeping aspect
-    box_w, box_h = W - 112, 448
-    scale = min(box_w / page.width, box_h / page.height)
+    band = 104                       # caption strip at the bottom
+    avail_w, avail_h = W, H - band
+    scale = min(avail_w / page.width, avail_h / page.height)
     page = page.resize((max(1, int(page.width * scale)), max(1, int(page.height * scale))),
                        Image.LANCZOS)
     img, d = canvas()
-    caption(d, 64, "Controlled tabs are marked, in the window you already use",
-            "受控标签带可见标记与 favicon 换装，不弹新窗口、不抢焦点")
     x = (W - page.width) // 2
-    y = 216
-    img.paste(page, (x, y))
-    d.rectangle([x - 3, y - 3, x + page.width + 2, y + page.height + 2],
-                outline=TEAL, width=3)
-    d.text((56, y + box_h + 30), "xb bridge · tab groups · visible marks · leases",
-           font=font("sans", 20), fill=TEAL)
+    img.paste(page, (x, 0))
+    d.rectangle([x, 0, x + page.width - 1, page.height - 1], outline=TEAL, width=3)
+    d.text((56, H - band + 26),
+           "Controlled tabs are marked, in the window you already use",
+           font=font("bold", 28), fill=FG)
+    sub = "受控标签带可见标记与 favicon 换装，不弹新窗口、不抢焦点"
+    d.text((56, H - band + 64), sub, font=font("sans", 19, sub), fill=MUTED)
+    right = "xb bridge"
+    rw = d.textlength(right, font=font("bold", 20, right))
+    d.text((W - 56 - rw, H - band + 34), right, font=font("bold", 20, right), fill=TEAL)
     img.save(out_path)
 
 

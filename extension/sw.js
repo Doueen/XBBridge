@@ -829,7 +829,7 @@ function _fMark(opts) {
     '.frame{position:fixed;inset:0;box-sizing:border-box;border:2px solid rgba(20,190,160,.85);' +
     'box-shadow:inset 0 0 16px rgba(20,190,160,.22),inset 0 0 40px rgba(20,190,160,.10);' +
     'animation:xbBreathe 2.4s ease-in-out infinite alternate}' +
-    '.chip{position:fixed;left:12px;top:12px;display:flex;align-items:center;gap:7px;' +
+    '.chip{position:fixed;left:14px;bottom:14px;display:flex;align-items:center;gap:7px;' +
     'font:12px/1.45 -apple-system,system-ui,"Segoe UI",sans-serif;letter-spacing:.2px;' +
     'background:rgba(9,26,23,.88);color:#8af3da;padding:5px 11px;border-radius:999px;' +
     'border:1px solid rgba(20,190,160,.55);box-shadow:0 2px 10px rgba(0,0,0,.25)}' +
