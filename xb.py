@@ -411,6 +411,10 @@ def build_parser() -> argparse.ArgumentParser:
     ck.add_argument("--trusted", action="store_true", help="dispatch real CDP mouse events at the element centre")
     ck.add_argument("--double", action="store_true", help="double click")
     fl = sub.add_parser("fill", parents=[tgt]); fl.add_argument("text", nargs="?", default="")
+    ty = sub.add_parser("type", parents=[tgt],
+                        help="click a field and type like a person (works in shadow DOM)")
+    ty.add_argument("text", nargs="?", default="")
+    ty.add_argument("--append", action="store_true", help="keep what is already in the field")
     hv = sub.add_parser("hover", parents=[tgt])
     st = sub.add_parser("scroll-to", parents=[tgt])
     fo = sub.add_parser("focus", parents=[tgt])
@@ -422,7 +426,9 @@ def build_parser() -> argparse.ArgumentParser:
     wh = sub.add_parser("wheel"); wh.add_argument("--delta-y", type=int, default=300)
     wh.add_argument("--delta-x", type=int, default=0)
     wh.add_argument("--ref"); wh.add_argument("--selector"); wh.add_argument("--tab", type=int)
-    up = sub.add_parser("upload"); up.add_argument("target"); up.add_argument("--files", required=True)
+    up = sub.add_parser("upload"); up.add_argument("target", nargs="?", default=""); up.add_argument("--files", required=True)
+    up.add_argument("--shadow-index", type=int,
+                    help="pick the Nth <input type=file> even inside shadow roots (no selector needed)")
     up.add_argument("--tab", type=int)
     dr = sub.add_parser("drag", help="drag from one point/element to another with real CDP events")
     dr.add_argument("from_", metavar="from", help="\"x,y\", a CSS selector or @eN")
@@ -763,6 +769,12 @@ def main(argv=None) -> int:
               "noMark": True if getattr(args, "no_mark", False) else None,
               "markLabel": getattr(args, "mark_label", None)}
         emit(rpc("fill", ai), j, lambda r: print(f"filled {r.get('filled')} = {r.get('value')!r}"))
+    elif args.cmd == "type":
+        emit(rpc("type", {"tabId": tab, "marker": args.target, "text": args.text,
+                          "clear": False if getattr(args, "append", False) else True,
+                          "markLabel": getattr(args, "mark_label", None)}, timeout=120), j,
+             lambda r: print(f"typed {r['typed']} chars into {r['field']} "
+                             f"({r.get('aria') or 'unnamed field'})"))
     elif args.cmd == "press":
         emit(rpc("press", {"tabId": tab, "ref": args.ref, "selector": args.selector,
                            "keys": args.keys,
@@ -780,10 +792,14 @@ def main(argv=None) -> int:
                            "deltaY": args.delta_y, "deltaX": args.delta_x}), j,
              lambda r: print(f"wheel dy={r['deltaY']} -> scrollY={r.get('scrollY')}"))
     elif args.cmd == "upload":
-        emit(rpc("upload", {"tabId": tab, "ref": args.target if args.target.startswith("@") else None,
-                            "selector": None if args.target.startswith("@") else args.target,
+        sel = None if (args.target or "").startswith("@") or not args.target else args.target
+        emit(rpc("upload", {"tabId": tab,
+                            "ref": args.target if (args.target or "").startswith("@") else None,
+                            "selector": sel,
+                            "shadowIndex": args.shadow_index,
                             "files": [os.path.abspath(f) for f in csv_list(args.files)]}), j,
-             lambda r: print(f"uploaded {r['files']} into {r['selector']}"))
+             lambda r: print(f"uploaded {r['files']} into "
+                             + (r.get("selector") or f"shadow input #{r.get('shadowIndex')}")))
     elif args.cmd == "drag":
         emit(rpc("drag", {"tabId": tab, "from": args.from_, "to": args.to,
                           "steps": args.steps, "durationMs": args.duration,

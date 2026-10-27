@@ -20,13 +20,13 @@
 
 ### Purpose of the extension（单一用途声明，必填）
 
-> xb bridge lets a locally running command-line agent drive the user's own Edge tabs:
+> XBBridge lets a locally running command-line agent drive the user's own Edge tabs:
 > it opens tabs in a named tab group, marks the tabs it controls with a visible overlay,
 > reads pages on request, and performs clicks/typing/scrolling the user asked for.
 > It is a client for a companion daemon on the same machine (`127.0.0.1:8787`);
 > it does no work on its own and sends nothing off the device.
 
-中文：xb bridge 是本地命令行 agent 的浏览器端客户端——按你的指令在**你自己的** Edge 标签里
+中文：XBBridge 是本地命令行 agent 的浏览器端客户端——按你的指令在**你自己的** Edge 标签里
 开标签组、打可见标记、读页面、点击/输入/滚动。它本身不做事，也不把任何东西传出本机。
 
 ### Permissions justification（逐条，必填）
@@ -64,7 +64,7 @@
 
 ## Step 7 · Store listing
 
-**Extension name**（来自 manifest，只读）：`xb bridge`
+**Extension name**（来自 manifest，只读）：`XBBridge`
 
 **Short description / Summary**：
 
@@ -73,7 +73,7 @@
 
 **Detailed description（EN）**：
 
-> xb bridge is the browser half of `xb`, a command-line agent bridge that runs on your own
+> XBBridge is the browser half of `xb`, a command-line agent bridge that runs on your own
 > machine.
 >
 > • **Tabs, not windows** — the agent opens what it needs as tabs in a named, colour-coded
@@ -88,7 +88,7 @@
 > • **Honest errors** — every failure carries a code, an outcome (`applied` / `not_started`
 >   / `unknown`) and whether a retry is safe, so scripts never guess.
 >
-> xb bridge is a *client*: it needs the `xb` daemon (open source, Python) running on the same
+> XBBridge is a *client*: it needs the `xb` daemon (open source, Python) running on the same
 > computer. Without it the popup simply says the bridge is not connected and never touches
 > your browsing.
 >
@@ -96,7 +96,7 @@
 
 **Detailed description（中文）**：
 
-> xb bridge 是命令行 agent 桥 `xb` 的浏览器端。它在**你正在用的那个窗口**里，把 agent 需要的
+> XBBridge 是命令行 agent 桥 `xb` 的浏览器端。它在**你正在用的那个窗口**里，把 agent 需要的
 > 页面开成一个命名标签组：不弹新窗口、不抢焦点。
 >
 > • 受控标签有可见标记（青色描边 + 名字），favicon 也会换成 xb 图标，扫一眼标签栏就知道谁在被控制

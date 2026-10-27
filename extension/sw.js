@@ -601,6 +601,33 @@ async function onTarget(a, func, extraArgs) {
   return { tab, out, selector, frameId };
 }
 
+function _fFindByLabel(marker) {
+  /* Finds a text field by aria-label / placeholder, walking shadow roots, and
+   * reports a click point. Angular/Fluent forms ignore synthetic value writes,
+   * so the caller clicks the point and types with real CDP input instead. */
+  const m = String(marker || '').toLowerCase();
+  const roots = [];
+  const collect = (r) => { roots.push(r); r.querySelectorAll('*').forEach((e) => { if (e.shadowRoot) collect(e.shadowRoot); }); };
+  collect(document);
+  for (const r of roots) {
+    for (const el of r.querySelectorAll('textarea,input')) {
+      const type = (el.getAttribute('type') || 'text').toLowerCase();
+      if (!['text', 'search', 'url', 'email', ''].includes(type)) continue;
+      const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+      const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+      if (!aria.includes(m) && !ph.includes(m)) continue;
+      el.scrollIntoView({ block: 'center', inline: 'center' });
+      const b = el.getBoundingClientRect();
+      if (!b.width || !b.height) continue;
+      return {
+        rect: { x: Math.round(b.left + Math.min(b.width / 2, 120)), y: Math.round(b.top + Math.min(b.height / 2, 14)) },
+        tag: el.tagName.toLowerCase(), aria, existing: (el.value || '').length
+      };
+    }
+  }
+  return { rect: null };
+}
+
 function _fClickSel(sel) {
   const el = document.querySelector(sel);
   if (!el) return { error: 'element not found: ' + sel + ' (re-run snapshot)' };
@@ -1500,6 +1527,38 @@ const COMMANDS = {
              fromHit: from.hit, at: from.at, marked };
   },
 
+  /* Type like a person: click the field through CDP, then insert text as real
+   * input. Needed for Angular/Fluent forms (Partner Center) whose bindings
+   * ignore programmatic value writes, and it works through shadow roots. */
+  async type(a) {
+    const tab = await getTab(a.tabId, a);
+    const marked = await markTab(tab, a);
+    const marker = String(a.marker || '');
+    const text = a.text === undefined || a.text === null ? '' : String(a.text);
+    if (!marker) throw fail('invalid_params', 'marker required (aria-label or placeholder substring)');
+    const hit = await safeInject(tab.id, _fFindByLabel, [marker], a.frameId);
+    if (!hit || !hit.rect) throw fail('target_not_found', `no text field matching ${marker}`);
+    return await withDebugger(tab.id, async (t) => {
+      await chrome.debugger.sendCommand(t, 'Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
+      const { x, y } = hit.rect;
+      const base = { x, y, button: 'left', clickCount: 1, buttons: 1 };
+      await chrome.debugger.sendCommand(t, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      await chrome.debugger.sendCommand(t, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...base });
+      await chrome.debugger.sendCommand(t, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...base, buttons: 0 });
+      if (a.clear !== false) {
+        const key = (type, extra) => chrome.debugger.sendCommand(t, 'Input.dispatchKeyEvent', { type, ...extra });
+        await key('keyDown', { modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65 });
+        await key('keyUp', { modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65 });
+        await key('keyDown', { key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
+        await key('keyUp', { key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
+        await sleep(120);
+      }
+      if (text) await chrome.debugger.sendCommand(t, 'Input.insertText', { text });
+      await sleep(150);
+      return { tabId: tab.id, typed: text.length, field: hit.tag, aria: hit.aria, rect: hit.rect, marked };
+    });
+  },
+
   async fill(a) {
     const raw = a.ref !== undefined ? a.ref : a.selector;
     const ref = parseRef(raw);
@@ -1619,16 +1678,49 @@ const COMMANDS = {
   async upload(a) {
     const files = (a.files || []).map(String);
     if (!files.length) throw new Error('files required (absolute paths)');
-    const raw = a.ref !== undefined ? a.ref : a.selector;
-    if (typeof raw !== 'string' || !raw.length) throw new Error('ref or selector of the file input required');
-    const ref = parseRef(raw);
-    const selector = ref ? refSelector(ref.i) : raw;
     const tab = await getTab(a.tabId, a);
     const marked = await markTab(tab, a);
+
+    // Partner Center / Fluent UIs keep their <input type=file> inside shadow
+    // roots, where DOM.querySelector cannot see them. With shadowIndex we walk
+    // the pierced DOM tree instead and take the Nth file input in document order.
+    if (a.shadowIndex !== undefined && a.shadowIndex !== null) {
+      const want = Number(a.shadowIndex);
+      return await withDebugger(tab.id, async (t) => {
+        const doc = await chrome.debugger.sendCommand(t, 'DOM.getDocument', { depth: -1, pierce: true });
+        const nodes = [];
+        const attr = (node, name) => {
+          const list = node.attributes || [];
+          for (let i = 0; i < list.length; i += 2) if (list[i] === name) return list[i + 1];
+          return '';
+        };
+        const walk = (node) => {
+          if (!node) return;
+          if (node.nodeName === 'INPUT' && attr(node, 'type') === 'file') nodes.push(node);
+          (node.children || []).forEach(walk);
+          (node.shadowRoots || []).forEach(walk);
+          if (node.contentDocument) walk(node.contentDocument);
+        };
+        walk(doc.root);
+        const hit = nodes[want];
+        if (!hit) throw fail('target_not_found',
+          `no file input at shadow index ${want} (found ${nodes.length})`);
+        await chrome.debugger.sendCommand(t, 'DOM.setFileInputFiles', { nodeId: hit.nodeId, files });
+        return { tabId: tab.id, shadowIndex: want, files, marked,
+                 accepted: (hit.attributes || []).length, inputsFound: nodes.length };
+      });
+    }
+
+    const raw = a.ref !== undefined ? a.ref : a.selector;
+    if (typeof raw !== 'string' || !raw.length) {
+      throw fail('invalid_params', 'ref, selector or shadowIndex of the file input required');
+    }
+    const ref = parseRef(raw);
+    const selector = ref ? refSelector(ref.i) : raw;
     return await withDebugger(tab.id, async (t) => {
       const doc = await chrome.debugger.sendCommand(t, 'DOM.getDocument', { depth: -1, pierce: true });
       const q = await chrome.debugger.sendCommand(t, 'DOM.querySelector', { nodeId: doc.root.nodeId, selector });
-      if (!q || !q.nodeId) throw new Error('file input not found: ' + selector);
+      if (!q || !q.nodeId) throw fail('target_not_found', 'file input not found: ' + selector);
       await chrome.debugger.sendCommand(t, 'DOM.setFileInputFiles', { nodeId: q.nodeId, files });
       return { tabId: tab.id, selector, files, marked };
     });

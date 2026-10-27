@@ -91,7 +91,7 @@ def main() -> int:
     if "dev.reload is not available" not in sw:
         raise SystemExit("stage: dev.reload guard missing")
 
-    zip_path = os.path.join(args.out, f"xb-bridge-{man['version']}.zip")
+    zip_path = os.path.join(args.out, f"XBBridge-{man['version']}.zip")
     total = 0
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         for base, dirs, files in os.walk(stage_dir):

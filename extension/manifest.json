@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "xb bridge",
-  "short_name": "xb bridge",
-  "version": "0.3.3",
-  "description": "让你的 AI agent 在自己的标签页里干活：受控标签有可见标记，租约防止互相抢，动作可批量下发。命令行：xb",
+  "name": "XBBridge",
+  "short_name": "XBBridge",
+  "version": "0.3.4",
+  "description": "Let a local CLI agent work in your own Edge tabs: named tab groups, visible control markers, tab leases. CLI: xb",
   "minimum_chrome_version": "116",
   "icons": {
     "16": "icons/icon-16.png",
@@ -30,7 +30,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "xb bridge · 点开看受控标签",
+    "default_title": "XBBridge · 点开看受控标签",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",

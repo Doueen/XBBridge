@@ -32,7 +32,7 @@ edge://extensions  ->  开发人员模式  ->  加载解压缩的扩展  ->  C:\
 python xb.py status      # 期望：extension: connected  v0.3.2
 ```
 
-> 扩展在 Edge 里显示为 **xb bridge**（teal 圆角方块 + 白色 X，和受控标签的 favicon 是同一个符号）。
+> 扩展在 Edge 里显示为 **XBBridge**（teal 圆角方块 + 白色 X，和受控标签的 favicon 是同一个符号）。
 > 改完 `manifest.json` 或图标后，`edge://extensions` 点该卡片的"重新加载"，或者 `python xb.py ext-reload`。
 >
 > 选成仓库根目录（`...\edge-agent`）会报

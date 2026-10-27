@@ -1,10 +1,10 @@
-# Privacy policy — xb bridge
+# Privacy policy — XBBridge
 
 _Last updated: 2026-10-27_
 
 ## 一句话
 
-xb bridge 不收集、不上传、不分析任何数据。它只在你自己的电脑上，通过 `127.0.0.1` 的本地
+XBBridge 不收集、不上传、不分析任何数据。它只在你自己的电脑上，通过 `127.0.0.1` 的本地
 WebSocket 和你自己启动的 `xb` 命令行工具通信。
 
 ## 它访问什么，为什么
