@@ -26,11 +26,15 @@ bsk（[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)，MIT）�
 ## 安装（一次性）
 
 ```powershell
-# 1) 扩展
-edge://extensions  ->  开发人员模式  ->  加载解压缩的扩展  ->  选 edge-agent\extension
+# 1) 扩展：必须选 edge-agent\extension 这一层，不是仓库根目录
+edge://extensions  ->  开发人员模式  ->  加载解压缩的扩展  ->  C:\WorkSpace\HermesWorkSpace\edge-agent\extension
 # 2) 自检
 python xb.py status      # 期望：extension: connected  v0.3.0
 ```
+
+> 选成仓库根目录（`...\edge-agent`）会报
+> `Cannot load extension with file or directory name __pycache__. Filenames starting with "_" are reserved`——
+> 根目录里有 `bridge/`、`test/`、`xb.py` 和 Python 的 `__pycache__`，只有 `extension/` 是扩展本体（4 个文件：`manifest.json` / `sw.js` / `popup.html` / `popup.js`）。
 
 守护进程不用手动起，任何 `xb` 命令发现它不在都会自己拉起来（日志 `.xb/server.log`）；
 要前台调试 `python xb.py serve`，要停 `python xb.py stop`。
