@@ -121,9 +121,9 @@ def main() -> int:
     # commands: e2e must be pinned to the throw-away profile launch.py started.
     listing = xb("browsers")
     rows = (listing.get("instances") if isinstance(listing, dict) else []) or []
-    if len(rows) > 1 and not TARGET:
-        print(f"refusing to run: {len(rows)} browsers connected and no test/.instance — "
-              "start one with `python test/launch.py` first", file=sys.stderr)
+    if not TARGET:
+        print(f"refusing to run: {len(rows)} browser(s) connected but no test/.instance — "
+              "start a throw-away one with `python test/launch.py` first", file=sys.stderr)
         return 2
 
     print("== status ==")
