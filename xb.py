@@ -313,12 +313,30 @@ def do_download(args) -> None:
         raise XbFailure("invalid_params",
                         "download needs a URL or a ref/selector that triggers a download",
                         cmd="download")
-    info = rpc("download.wait", {"sinceMs": since, "timeoutMs": int(args.timeout * 1000)},
-               timeout=args.timeout + 20)
-    src = info.get("filename") or ""
-    if not src or not os.path.exists(src):
-        raise XbFailure("target_not_found",
-                        f"the browser reported {src!r} but no file is there", cmd="download")
+
+    # 同一个文件下第二次时，downloads.search 会把**上一次已完成**的记录再报一遍，
+    # 而它的文件已经被我们搬走了 → "报了路径但文件不存在"。所以这里给几次机会，
+    # 只接受真实存在的文件，并把已消费的路径记下来跳过。
+    deadline = time.time() + max(1.0, args.timeout)
+    seen: set[str] = set()
+    src = ""
+    while True:
+        left = max(1.0, deadline - time.time())
+        info = rpc("download.wait",
+                   {"sinceMs": since, "timeoutMs": int(min(left, 30) * 1000)},
+                   timeout=left + 20)
+        candidate = info.get("filename") or ""
+        if candidate and candidate not in seen and os.path.exists(candidate):
+            src = candidate
+            break
+        if candidate:
+            seen.add(candidate)
+        if time.time() >= deadline:
+            raise XbFailure("target_not_found",
+                            f"the browser reported {candidate or 'nothing'} but no file is there "
+                            f"({len(seen)} stale record(s) skipped)", cmd="download")
+        time.sleep(0.3)
+
     dst = os.path.join(d, os.path.basename(src))
     if os.path.abspath(src) != dst:
         try:
