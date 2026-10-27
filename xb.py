@@ -236,6 +236,9 @@ def build_parser() -> argparse.ArgumentParser:
     tgt = argparse.ArgumentParser(add_help=False)
     tgt.add_argument("target", nargs="?", help="ref (@e12) or css selector")
     tgt.add_argument("--tab", type=int)
+    tgt.add_argument("--no-mark", action="store_true", dest="no_mark",
+                     help="don't paint the control marker on this tab")
+    tgt.add_argument("--mark-label", dest="mark_label", help="label shown in the marker chip")
 
     # infra
     sub.add_parser("status")
@@ -347,6 +350,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("recent").add_argument("--limit", type=int, default=10)
     rs = sub.add_parser("restore"); rs.add_argument("session_id", nargs="?")
+
+    # visibility
+    mk = sub.add_parser("mark", help="paint the control marker on a tab")
+    mk.add_argument("--tab", type=int); mk.add_argument("--label", default="")
+    um = sub.add_parser("unmark", help="remove the marker (and restore the favicon)")
+    um.add_argument("--tab", type=int); um.add_argument("--all", action="store_true")
+    sub.add_parser("marks", help="list marked tabs")
+    pu = sub.add_parser("pulse", help="flash a ring at a point/element")
+    pu.add_argument("--tab", type=int); pu.add_argument("--ref"); pu.add_argument("--selector")
+    pu.add_argument("--x", type=int); pu.add_argument("--y", type=int)
+    pu.add_argument("--no-mark", action="store_true", dest="no_mark")
+    pu.add_argument("--mark-label", dest="mark_label")
 
     return p
 
@@ -520,17 +535,24 @@ def main(argv=None) -> int:
     # ---- interaction ----
     elif args.cmd in ("click", "hover", "scroll-to", "focus", "blur"):
         ai = {"tabId": tab, "ref": args.target if (args.target or "").startswith("@") else None,
-              "selector": None if (args.target or "").startswith("@") else args.target}
+              "selector": None if (args.target or "").startswith("@") else args.target,
+              "noMark": True if getattr(args, "no_mark", False) else None,
+              "markLabel": getattr(args, "mark_label", None)}
         emit(rpc(args.cmd, ai), j, lambda r: print(f"{args.cmd}: " + json.dumps(
             {k: v for k, v in r.items() if k != "tabId"}, ensure_ascii=False)))
     elif args.cmd == "fill":
         ai = {"tabId": tab, "text": args.text,
               "ref": args.target if (args.target or "").startswith("@") else None,
-              "selector": None if (args.target or "").startswith("@") else args.target}
+              "selector": None if (args.target or "").startswith("@") else args.target,
+              "noMark": True if getattr(args, "no_mark", False) else None,
+              "markLabel": getattr(args, "mark_label", None)}
         emit(rpc("fill", ai), j, lambda r: print(f"filled {r.get('filled')} = {r.get('value')!r}"))
     elif args.cmd == "press":
         emit(rpc("press", {"tabId": tab, "ref": args.ref, "selector": args.selector,
-                           "keys": args.keys}), j, lambda r: print(f"pressed {r.get('pressed')}"))
+                           "keys": args.keys,
+                           "noMark": True if getattr(args, "no_mark", False) else None,
+                           "markLabel": getattr(args, "mark_label", None)},
+                 ), j, lambda r: print(f"pressed {r.get('pressed')}"))
     elif args.cmd == "select":
         vals = csv_list(args.values or args.value or "")
         emit(rpc("select", {"tabId": tab, "ref": args.target if args.target.startswith("@") else None,
@@ -629,6 +651,31 @@ def main(argv=None) -> int:
     elif args.cmd == "restore":
         emit(rpc("sessions.restore", {"sessionId": args.session_id}), j,
              lambda r: print(f"restored {r['restored']}"))
+
+    # ---- visibility ----
+    elif args.cmd == "mark":
+        emit(rpc("mark", {"tabId": tab, "label": args.label}), j,
+             lambda r: print(f"marked tab {r['tabId']}" + (f" — {r['label']}" if r.get("label") else "")))
+    elif args.cmd == "unmark":
+        emit(rpc("unmark", {"tabId": tab, "all": True if args.all else None}), j,
+             lambda r: print("cleared: " + (", ".join(map(str, r.get("cleared") or [])) or "(nothing marked)")))
+    elif args.cmd == "marks":
+        r = rpc("marks", {})
+        if j:
+            print(json.dumps(r, ensure_ascii=False, indent=2))
+        elif not r.get("count"):
+            print("(no marked tabs)")
+        else:
+            for m in r["marks"]:
+                live = m.get("overlay") or {}
+                state = "overlay ok" if live.get("marked") else ("overlay gone" if live else "-")
+                print(f"{m['tabId']:>7}  {state:<12}  {(m.get('label') or '(default)')[:60]}")
+    elif args.cmd == "pulse":
+        emit(rpc("pulse", {"tabId": tab, "ref": args.ref, "selector": args.selector,
+                           "x": args.x, "y": args.y,
+                           "noMark": True if args.no_mark else None,
+                           "markLabel": args.mark_label}), j,
+             lambda r: print(f"pulse at {r['x']},{r['y']}"))
     return 0
 
 

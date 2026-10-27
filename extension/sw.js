@@ -563,6 +563,242 @@ function _fHelpOverlay(message, id) {
 
 function _fHelpPoll(id) { return { done: window['__xbHelpDone_' + id] === true }; }
 
+/* ---- control markers: make an agent-driven tab visible to the human ----
+ * Everything lives in a shadow root so page CSS can't restyle it, and every
+ * element is pointer-events:none so it can never swallow a real click.
+ */
+function _fMark(opts) {
+  const o = opts || {};
+  const ID = 'xb-mark-root';
+  const old = document.getElementById(ID);
+  if (old) old.remove();
+  const root = document.createElement('div');
+  root.id = ID;
+  // the label lives on the DOM, not on window: CDP eval runs in the main world
+  // and must be able to read it back while the overlay was painted from ISOLATED
+  root.setAttribute('data-xb-label', o.label || '');
+  root.setAttribute('data-xb-marked-at', String(Date.now()));
+  Object.assign(root.style, {
+    all: 'initial', position: 'fixed', inset: '0', width: '100vw', height: '100vh',
+    pointerEvents: 'none', zIndex: '2147483647'
+  });
+  const sh = root.attachShadow({ mode: 'open' });
+  const style = document.createElement('style');
+  style.textContent =
+    '.frame{position:fixed;inset:0;box-sizing:border-box;border:2px solid rgba(20,190,160,.85);' +
+    'box-shadow:inset 0 0 16px rgba(20,190,160,.22),inset 0 0 40px rgba(20,190,160,.10);' +
+    'animation:xbBreathe 2.4s ease-in-out infinite alternate}' +
+    '.chip{position:fixed;left:12px;top:12px;display:flex;align-items:center;gap:7px;' +
+    'font:12px/1.45 -apple-system,system-ui,"Segoe UI",sans-serif;letter-spacing:.2px;' +
+    'background:rgba(9,26,23,.88);color:#8af3da;padding:5px 11px;border-radius:999px;' +
+    'border:1px solid rgba(20,190,160,.55);box-shadow:0 2px 10px rgba(0,0,0,.25)}' +
+    '.dot{width:7px;height:7px;border-radius:50%;background:#2ee6b8;box-shadow:0 0 7px #2ee6b8;' +
+    'animation:xbBlink 1.3s ease-in-out infinite}' +
+    '@keyframes xbBreathe{from{opacity:.42}to{opacity:.95}}' +
+    '@keyframes xbBlink{0%,100%{opacity:1}50%{opacity:.25}}';
+  const frame = document.createElement('div');
+  frame.className = 'frame';
+  const chip = document.createElement('div');
+  chip.className = 'chip';
+  const dot = document.createElement('span');
+  dot.className = 'dot';
+  chip.append(dot, document.createTextNode(o.label || 'xb 正在操作这个标签'));
+  sh.append(style, frame, chip);
+  (document.documentElement || document.body).appendChild(root);
+  window.__xbMark = { at: Date.now(), label: o.label || '' };
+  return { marked: true, label: o.label || '', overlayId: ID };
+}
+
+function _fUnmark() {
+  const el = document.getElementById('xb-mark-root');
+  if (el) el.remove();
+  try { delete window.__xbMark; } catch (e) { window.__xbMark = undefined; }
+  return { marked: false, removed: !!el };
+}
+
+function _fMarkState() {
+  const el = document.getElementById('xb-mark-root');
+  return {
+    marked: !!el,
+    label: el ? (el.getAttribute('data-xb-label') || '') : null,
+    markedAt: el ? Number(el.getAttribute('data-xb-marked-at') || 0) : null
+  };
+}
+
+/* One short ring at the point that is about to be acted on. */
+function _fPulse(o) {
+  const p = o || {};
+  const x = Number(p.x) || 0, y = Number(p.y) || 0;
+  const w = Number(p.w) || 0, h = Number(p.h) || 0;
+  const root = document.createElement('div');
+  root.id = 'xb-pulse-root';
+  Object.assign(root.style, {
+    all: 'initial', position: 'fixed', inset: '0', pointerEvents: 'none', zIndex: '2147483646'
+  });
+  const sh = root.attachShadow({ mode: 'open' });
+  const box = document.createElement('div');
+  const size = Math.max(26, Math.min(120, Math.max(w, h) || 34));
+  const cx = w ? x : x, cy = h ? y : y;
+  Object.assign(box.style, {
+    position: 'fixed', left: `${Math.round(cx - size / 2)}px`, top: `${Math.round(cy - size / 2)}px`,
+    width: `${size}px`, height: `${size}px`, borderRadius: '50%',
+    border: '2px solid rgba(46,230,184,.95)', boxSizing: 'border-box',
+    boxShadow: '0 0 12px rgba(46,230,184,.65), inset 0 0 8px rgba(46,230,184,.35)'
+  });
+  sh.append(box);
+  (document.documentElement || document.body).appendChild(root);
+  const done = () => root.remove();
+  try {
+    const anim = box.animate(
+      [{ transform: 'scale(.45)', opacity: 1 }, { transform: 'scale(1.35)', opacity: 0 }],
+      { duration: 620, easing: 'ease-out' }
+    );
+    anim.onfinish = done;
+    setTimeout(done, 900);
+  } catch (e) { setTimeout(done, 320); }
+  return { pulsed: true };
+}
+
+/* Tint the favicon while the tab is agent-controlled (survives navigation). */
+function _fFavicon(o) {
+  const p = o || {};
+  const ID = 'xb-favicon-link';
+  const html = document.documentElement;
+  if (p.off) {
+    const made = document.getElementById(ID);
+    if (made) made.remove();
+    const original = html.getAttribute('data-xb-favicon');
+    if (original !== null) {
+      const link = document.createElement('link');
+      link.rel = 'icon';
+      link.href = original;
+      document.head.appendChild(link);
+      html.removeAttribute('data-xb-favicon');
+    }
+    return { favicon: 'restored' };
+  }
+  const links = Array.from(document.querySelectorAll('link[rel~="icon"],link[rel="shortcut icon"]'));
+  if (!html.getAttribute('data-xb-favicon')) {
+    html.setAttribute('data-xb-favicon', links.length ? links[links.length - 1].href : '');
+  }
+  const c = document.createElement('canvas');
+  c.width = 32; c.height = 32;
+  const g = c.getContext('2d');
+  if (g) {
+    g.fillStyle = p.color || '#0d9488';
+    g.beginPath(); g.arc(16, 16, 15, 0, Math.PI * 2); g.fill();
+    g.fillStyle = '#eafff8';
+    g.font = 'bold 19px -apple-system,system-ui,sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('x', 16, 17);
+  }
+  const href = g ? c.toDataURL('image/png') : '';
+  if (!href) return { favicon: 'unsupported' };
+  let made = document.getElementById(ID);
+  if (!made) {
+    made = document.createElement('link');
+    made.id = ID;
+    made.rel = 'icon';
+    document.head.appendChild(made);
+  }
+  made.href = href;
+  return { favicon: 'tinted' };
+}
+
+/* ---- mark registry: which tabs the agent currently controls ---- */
+
+const MARKS = new Map();          // tabId -> {label, ts, favicon}
+const MARK_TTL_MS = 15 * 60 * 1000;
+const MARK_STORE_KEY = 'xbMarks';
+
+function markView(tabId, m) {
+  return { tabId, label: m.label || '', ageMs: Date.now() - m.ts, ttlMs: MARK_TTL_MS,
+           favicon: m.favicon !== false };
+}
+
+async function persistMarks() {
+  try {
+    const rows = Array.from(MARKS.entries()).map(([tabId, m]) => ({ tabId, label: m.label, ts: m.ts }));
+    await chrome.storage.session.set({ [MARK_STORE_KEY]: rows });
+  } catch (e) { /* session storage is best-effort */ }
+}
+
+async function restoreMarks() {
+  try {
+    const got = await chrome.storage.session.get(MARK_STORE_KEY);
+    const rows = got && got[MARK_STORE_KEY];
+    if (!Array.isArray(rows)) return;
+    for (const row of rows) {
+      if (Date.now() - (row.ts || 0) > MARK_TTL_MS) continue;
+      const tabId = Number(row.tabId);
+      try {
+        await chrome.tabs.get(tabId);
+      } catch (e) { continue; }   // tab died while the worker was asleep
+      await paintMark(tabId, row.label).catch(() => {});
+      MARKS.set(tabId, { label: row.label || '', ts: row.ts || Date.now(), favicon: true });
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function paintMark(tabId, label) {
+  const out = await inject(tabId, _fMark, [{ label: label || '' }]);
+  try { await inject(tabId, _fFavicon, [{}]); } catch (e) { /* favicon is cosmetic */ }
+  return out;
+}
+
+async function clearMark(tabId) {
+  try {
+    await inject(tabId, _fUnmark, []);
+    await inject(tabId, _fFavicon, [{ off: true }]);
+  } catch (e) { /* page may be gone or restricted */ }
+  MARKS.delete(tabId);
+  await persistMarks();
+}
+
+/** Mark a tab once; re-marking only updates the label. */
+async function ensureMark(tabId, label) {
+  const existing = MARKS.get(tabId);
+  if (existing) {
+    if (label && label !== existing.label) {
+      existing.label = label;
+      existing.ts = Date.now();
+      await paintMark(tabId, label).catch(() => {});
+      await persistMarks();
+    }
+    return { ...markView(tabId, existing), reused: true };
+  }
+  await paintMark(tabId, label);
+  const rec = { label: label || '', ts: Date.now(), favicon: true };
+  MARKS.set(tabId, rec);
+  await persistMarks();
+  return markView(tabId, rec);
+}
+
+async function pulseAt(tabId, selector, frameId) {
+  try {
+    const box = await inject(tabId, _fBox, [selector], frameId);
+    if (box && !box.error) {
+      await inject(tabId, _fPulse, [{ x: box.x, y: box.y, w: box.w, h: box.h }]);
+    }
+  } catch (e) { /* a pulse must never fail the action */ }
+}
+
+/** Mutating commands call this: the human can always see which tab is in use. */
+async function markTab(tab, a) {
+  if (a && a.noMark === true) return false;
+  const m = await ensureMark(tab.id, a && a.markLabel).catch(() => null);
+  return !!m;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  let changed = false;
+  for (const [tabId, m] of Array.from(MARKS.entries())) {
+    if (now - m.ts > MARK_TTL_MS) { MARKS.delete(tabId); changed = true; }
+  }
+  if (changed) persistMarks().catch(() => {});
+}, 60 * 1000);
+
 /* ----------------------------------------------------------------- debugger */
 
 const DBG = new Map();   // tabId -> {console:[], network:[], netIds:Map, timer, own, attached}
@@ -920,9 +1156,11 @@ const COMMANDS = {
     const selector = ref ? refSelector(ref.i) : raw;
     if (!selector) throw new Error('ref or selector required');
     const tab = await getTab(a.tabId);
+    if (a.flash !== false) await pulseAt(tab.id, selector, ref ? ref.frameId : 0);
+    const marked = a.noMark === true ? null : await ensureMark(tab.id, a.markLabel).catch(() => null);
     const out = await inject(tab.id, _fClickSel, [selector], ref ? ref.frameId : 0);
     if (out.error) throw new Error(out.error);
-    return { tabId: tab.id, ...out };
+    return { tabId: tab.id, ...out, marked: !!marked };
   },
 
   async fill(a) {
@@ -931,16 +1169,19 @@ const COMMANDS = {
     const selector = ref ? refSelector(ref.i) : raw;
     if (!selector) throw new Error('ref or selector required');
     const tab = await getTab(a.tabId);
+    if (a.flash !== false) await pulseAt(tab.id, selector, ref ? ref.frameId : 0);
+    const marked = a.noMark === true ? null : await ensureMark(tab.id, a.markLabel).catch(() => null);
     const out = await inject(tab.id, _fFillSel, [selector, a.text === undefined ? '' : String(a.text)], ref ? ref.frameId : 0);
     if (out.error) throw new Error(out.error);
-    return { tabId: tab.id, ...out };
+    return { tabId: tab.id, ...out, marked: !!marked };
   },
 
   async select(a) {
     const values = a.values !== undefined ? a.values : a.value;
     if (values === undefined) throw new Error('values required');
     const r = await onTarget(a, _fSelect, [Array.isArray(values) ? values : [values]]);
-    return { tabId: r.tab.id, ...r.out };
+    const marked = await markTab(r.tab, a);
+    return { tabId: r.tab.id, ...r.out, marked };
   },
 
   async focus(a) {
@@ -961,10 +1202,12 @@ const COMMANDS = {
   async hover(a) {
     const r = await onTarget(a, _fBox, []);
     const { x, y } = r.out;
+    if (a.flash !== false) await inject(r.tab.id, _fPulse, [{ x, y }]).catch(() => {});
     await withDebugger(r.tab.id, async (t) => {
       await chrome.debugger.sendCommand(t, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
     });
-    return { tabId: r.tab.id, hovered: r.selector, x, y };
+    const marked = await markTab(r.tab, a);
+    return { tabId: r.tab.id, hovered: r.selector, x, y, marked };
   },
 
   async wheel(a) {
@@ -1021,8 +1264,19 @@ const COMMANDS = {
     if (a.ref !== undefined || a.selector !== undefined) {
       await onTarget(a, _fFocus, [true]).catch(() => {});
     }
+    const marked = await markTab(tab, a);
     const combo = Array.isArray(keys) ? String(keys[0]) : String(keys);
-    return { tabId: tab.id, ...(await dispatchKey(tab.id, combo)) };
+    // a sequence ("Enter,Tab") types several combos with a small gap, like bsk does
+    const seq = Array.isArray(keys) ? keys.map(String) : String(keys).split(',').map((s) => s.trim()).filter(Boolean);
+    if (seq.length > 1) {
+      const done = [];
+      for (const c of seq) {
+        done.push(await dispatchKey(tab.id, c));
+        await sleep(Number(a.intervalMs || 60));
+      }
+      return { tabId: tab.id, pressed: seq, sequence: done, marked };
+    }
+    return { tabId: tab.id, ...(await dispatchKey(tab.id, combo)), marked };
   },
 
   async upload(a) {
@@ -1033,12 +1287,13 @@ const COMMANDS = {
     const ref = parseRef(raw);
     const selector = ref ? refSelector(ref.i) : raw;
     const tab = await getTab(a.tabId);
+    const marked = await markTab(tab, a);
     return await withDebugger(tab.id, async (t) => {
       const doc = await chrome.debugger.sendCommand(t, 'DOM.getDocument', { depth: -1, pierce: true });
       const q = await chrome.debugger.sendCommand(t, 'DOM.querySelector', { nodeId: doc.root.nodeId, selector });
       if (!q || !q.nodeId) throw new Error('file input not found: ' + selector);
       await chrome.debugger.sendCommand(t, 'DOM.setFileInputFiles', { nodeId: q.nodeId, files });
-      return { tabId: tab.id, selector, files };
+      return { tabId: tab.id, selector, files, marked };
     });
   },
 
@@ -1228,6 +1483,54 @@ const COMMANDS = {
         'action.setBadgeText': !!(chrome.action && chrome.action.setBadgeText)
       }
     };
+  },
+
+  /* ---- visibility: which tabs is the agent driving right now ---- */
+
+  async mark(a) {
+    const tab = await getTab(a.tabId);
+    const view = await ensureMark(tab.id, a.label === undefined ? '' : String(a.label));
+    return { tabId: tab.id, ...view };
+  },
+
+  async unmark(a) {
+    if (a.all === true) {
+      const ids = Array.from(MARKS.keys());
+      for (const id of ids) await clearMark(id);
+      return { cleared: ids };
+    }
+    const tab = await getTab(a.tabId);
+    const had = MARKS.has(tab.id);
+    await clearMark(tab.id);
+    return { tabId: tab.id, cleared: had ? [tab.id] : [] };
+  },
+
+  async marks(a) {
+    const rows = [];
+    for (const [tabId, m] of MARKS.entries()) {
+      let live = null;
+      if (a.live !== false) {
+        try { live = await inject(tabId, _fMarkState, []); } catch (e) { live = { error: 'unreachable' }; }
+      }
+      rows.push({ ...markView(tabId, m), overlay: live });
+    }
+    return { count: rows.length, marks: rows };
+  },
+
+  async pulse(a) {
+    const tab = await getTab(a.tabId);
+    let x = a.x, y = a.y;
+    if (x === undefined || y === undefined) {
+      if (a.ref !== undefined || a.selector !== undefined) {
+        const r = await onTarget(a, _fBox, []);
+        x = r.out.x; y = r.out.y;
+      } else {
+        const c = await inject(tab.id, _fCenter, []);
+        x = c.x; y = c.y;
+      }
+    }
+    await inject(tab.id, _fPulse, [{ x, y, w: a.w, h: a.h }]);
+    return { tabId: tab.id, pulsed: true, x, y };
   },
 
   /* ---- Chromium/Edge extras ---- */
@@ -1647,6 +1950,20 @@ chrome.runtime.onInstalled.addListener(() => { connect(); });
 chrome.runtime.onStartup.addListener(() => { connect(); });
 chrome.action.onClicked.addListener(() => { backoff = RECONNECT_MIN; connect(); });
 
+/* a mark dies with its tab, and an overlay dies with its document: repaint */
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (!MARKS.has(tabId)) return;
+  MARKS.delete(tabId);
+  persistMarks().catch(() => {});
+});
+
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status !== 'complete') return;
+  const m = MARKS.get(tabId);
+  if (!m) return;
+  paintMark(tabId, m.label).catch(() => {});
+});
+
 chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== KEEPALIVE_ALARM) return;
@@ -1654,4 +1971,5 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 connect();
+restoreMarks().catch(() => {});
 log('service worker booted');
