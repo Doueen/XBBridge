@@ -27,6 +27,50 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER = os.path.join(HERE, "bridge", "server.py")
 LOG = os.path.join(HERE, ".xb", "server.log")
 COLORS = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan"]
+JSON_MODE = False
+
+# exit codes: stable per failure class so scripts can branch without parsing
+EXIT_BY_CODE = {
+    "invalid_params": 2, "unsupported_method": 2,
+    "no_target_tab": 3, "extension_unavailable": 3, "unavailable": 3, "bridge_unavailable": 3,
+    "timeout": 4,
+    "target_not_found": 5, "restricted_page": 5,
+    "stale_generation": 6, "tab_not_owned": 6, "claim_required": 6,
+    "debugger_conflict": 7,
+}
+
+
+class XbFailure(RuntimeError):
+    """A failed command with the extension's error contract attached."""
+
+    def __init__(self, code: str, message: str, outcome: str = "unknown",
+                 retryable: bool = False, cmd: str = ""):
+        super().__init__(message)
+        self.code = code
+        self.outcome = outcome
+        self.retryable = retryable
+        self.cmd = cmd
+
+    @property
+    def exit_code(self) -> int:
+        return EXIT_BY_CODE.get(self.code, 1)
+
+    def render(self) -> None:
+        if JSON_MODE:
+            print(json.dumps({"ok": False, "cmd": self.cmd,
+                              "error": {"code": self.code, "message": str(self),
+                                        "outcome": self.outcome,
+                                        "retryable": self.retryable}},
+                             ensure_ascii=False))
+            return
+        bits = [f"xb: {self.cmd + ' failed — ' if self.cmd else ''}{self}"]
+        meta = [self.code]
+        if self.outcome and self.outcome != "not_started":
+            meta.append(f"outcome={self.outcome}")
+        if self.retryable:
+            meta.append("retryable")
+        bits.append(f"     [{', '.join(meta)}]")
+        print("\n".join(bits), file=sys.stderr)
 
 
 # ------------------------------------------------------------------ plumbing
@@ -63,7 +107,9 @@ def ensure_daemon(quiet: bool = False) -> None:
                 print(f"(started bridge daemon :{HTTP_PORT})", file=sys.stderr)
             return
         time.sleep(0.1)
-    raise SystemExit(f"could not start bridge daemon — see {LOG}")
+    raise XbFailure("bridge_unavailable",
+                    f"could not start bridge daemon — see {LOG}",
+                    retryable=True, cmd="daemon")
 
 
 def rpc(cmd: str, args: dict | None = None, timeout: float = 60.0):
@@ -74,14 +120,26 @@ def rpc(cmd: str, args: dict | None = None, timeout: float = 60.0):
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")
         try:
-            msg = json.loads(body).get("error")
+            err = json.loads(body).get("error")
         except Exception:
-            msg = body
-        raise SystemExit(f"xb: {cmd} failed — {msg}")
+            err = None
+        if isinstance(err, dict):
+            raise XbFailure(err.get("code") or "command_failed",
+                            err.get("message") or f"{cmd} failed",
+                            outcome=err.get("outcome") or "unknown",
+                            retryable=bool(err.get("retryable")), cmd=cmd)
+        raise XbFailure("command_failed", str(err or body or f"{cmd} failed"), cmd=cmd)
     except urllib.error.URLError as e:
-        raise SystemExit(f"xb: bridge unreachable ({e})")
+        raise XbFailure("bridge_unavailable", f"bridge unreachable ({e})",
+                        retryable=True, cmd=cmd)
     if not res.get("ok"):
-        raise SystemExit(f"xb: {cmd} failed — {res.get('error')}")
+        err = res.get("error")
+        if isinstance(err, dict):
+            raise XbFailure(err.get("code") or "command_failed",
+                            err.get("message") or f"{cmd} failed",
+                            outcome=err.get("outcome") or "unknown",
+                            retryable=bool(err.get("retryable")), cmd=cmd)
+        raise XbFailure("command_failed", str(err or f"{cmd} failed"), cmd=cmd)
     return res.get("result")
 
 
@@ -149,12 +207,15 @@ def do_download(args) -> None:
         rpc("click", {"tabId": args.tab, "ref": args.target if args.target.startswith("@") else None,
                       "selector": None if args.target.startswith("@") else args.target})
     else:
-        raise SystemExit("xb: download needs a URL or a ref/selector that triggers a download")
+        raise XbFailure("invalid_params",
+                        "download needs a URL or a ref/selector that triggers a download",
+                        cmd="download")
     info = rpc("download.wait", {"sinceMs": since, "timeoutMs": int(args.timeout * 1000)},
                timeout=args.timeout + 20)
     src = info.get("filename") or ""
     if not src or not os.path.exists(src):
-        raise SystemExit(f"xb: the browser reported {src!r} but no file is there")
+        raise XbFailure("target_not_found",
+                        f"the browser reported {src!r} but no file is there", cmd="download")
     dst = os.path.join(d, os.path.basename(src))
     if os.path.abspath(src) != dst:
         try:
@@ -282,8 +343,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    global JSON_MODE
     args = build_parser().parse_args(argv)
     j = args.json
+    JSON_MODE = bool(j)
     tab = getattr(args, "tab", None)
 
     if args.cmd == "status":
@@ -552,5 +615,17 @@ def main(argv=None) -> int:
     return 0
 
 
+def run(argv=None) -> int:
+    """Entry point: turn a failed command into the documented exit code."""
+    try:
+        return main(argv)
+    except XbFailure as exc:
+        exc.render()
+        return exc.exit_code
+    except KeyboardInterrupt:
+        print("xb: interrupted", file=sys.stderr)
+        return 130
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())

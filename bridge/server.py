@@ -24,6 +24,22 @@ WS_PORT = int(os.environ.get("XB_WS_PORT", "8787"))
 HTTP_PORT = int(os.environ.get("XB_HTTP_PORT", "8788"))
 MAX_MSG = 96 * 1024 * 1024  # screenshots come back as base64 data URLs
 
+# HTTP status mirrors the failure class so automation can branch without
+# parsing prose.
+STATUS_BY_CODE = {
+    "invalid_params": 400,
+    "unsupported_method": 400,
+    "target_not_found": 404,
+    "no_target_tab": 404,
+    "restricted_page": 409,
+    "stale_generation": 409,
+    "tab_not_owned": 409,
+    "claim_required": 409,
+    "extension_unavailable": 503,
+    "unavailable": 503,
+    "timeout": 504,
+}
+
 LOCK = threading.Lock()
 EXT = None            # live ServerConnection to the extension
 EXT_INFO: dict = {}   # hello payload
@@ -37,7 +53,35 @@ def log(*parts) -> None:
 
 
 class BridgeError(RuntimeError):
-    pass
+    """Failure carrying the same contract the extension uses."""
+
+    def __init__(self, message: str, code: str = "unavailable",
+                 outcome: str = "not_started", retryable: bool = False):
+        super().__init__(message)
+        self.code = code
+        self.outcome = outcome
+        self.retryable = retryable
+
+    def payload(self) -> dict:
+        return {"code": self.code, "message": str(self), "outcome": self.outcome,
+                "retryable": self.retryable}
+
+
+def _fail_pending(reason: str, code: str) -> None:
+    """Wake every in-flight caller when the extension goes away.
+
+    Without this a call waits out its whole timeout after a disconnect, which
+    looks like a hung command instead of a lost browser.
+    """
+    with LOCK:
+        queues = list(PENDING.values())
+    for q in queues:
+        try:
+            q.put_nowait({"ok": False,
+                          "error": {"code": code, "message": reason,
+                                    "outcome": "unknown", "retryable": True}})
+        except queue.Full:
+            pass
 
 
 def call(cmd: str, args: dict | None = None, timeout: float = 30.0):
@@ -46,7 +90,8 @@ def call(cmd: str, args: dict | None = None, timeout: float = 30.0):
     if conn is None:
         raise BridgeError(
             "no extension connected — open Edge with the xb extension loaded "
-            f"(it dials ws://127.0.0.1:{WS_PORT})"
+            f"(it dials ws://127.0.0.1:{WS_PORT})",
+            code="extension_unavailable", retryable=True,
         )
     rid = uuid.uuid4().hex[:12]
     q: queue.Queue = queue.Queue()
@@ -55,11 +100,19 @@ def call(cmd: str, args: dict | None = None, timeout: float = 30.0):
         conn.send(json.dumps({"id": rid, "cmd": cmd, "args": args or {}}))
         msg = q.get(timeout=timeout)
     except queue.Empty:
-        raise BridgeError(f"timeout after {timeout:g}s waiting for '{cmd}'")
+        raise BridgeError(f"timeout after {timeout:g}s waiting for '{cmd}'",
+                          code="timeout", outcome="unknown", retryable=True)
     finally:
         PENDING.pop(rid, None)
     if not msg.get("ok"):
-        raise BridgeError(msg.get("error") or f"{cmd} failed")
+        err = msg.get("error")
+        if isinstance(err, dict):
+            raise BridgeError(err.get("message") or f"{cmd} failed",
+                              code=err.get("code") or "command_failed",
+                              outcome=err.get("outcome") or "unknown",
+                              retryable=bool(err.get("retryable")))
+        raise BridgeError(str(err or f"{cmd} failed"), code="command_failed",
+                          outcome="unknown")
     return msg.get("result")
 
 
@@ -90,6 +143,7 @@ def ws_handler(conn) -> None:
         with LOCK:
             if EXT is conn:
                 EXT = None
+        _fail_pending("the extension disconnected mid-command", "extension_unavailable")
         log("extension disconnected")
 
 
@@ -139,9 +193,13 @@ class Handler(BaseHTTPRequestHandler):
                           float(req.get("timeout") or 30))
             self._send(200, {"ok": True, "result": result})
         except BridgeError as exc:
-            self._send(503, {"ok": False, "error": str(exc)})
+            self._send(STATUS_BY_CODE.get(exc.code, 400),
+                       {"ok": False, "error": exc.payload()})
         except Exception as exc:
-            self._send(500, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+            self._send(500, {"ok": False,
+                             "error": {"code": "bridge_error",
+                                       "message": f"{type(exc).__name__}: {exc}",
+                                       "outcome": "unknown", "retryable": False}})
 
 
 def main() -> int:

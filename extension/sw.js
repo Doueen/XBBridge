@@ -20,6 +20,63 @@ let stats = { connectedAt: null, lastCmdAt: null, cmds: 0, errors: 0 };
 
 const log = (...a) => console.log('[xb]', ...a);
 
+/* --------------------------------------------------------------- errors */
+
+/*
+ * Every failure carries a machine-readable contract:
+ *   code      stable identifier the CLI maps to an exit code
+ *   outcome   not_started | applied | unknown  — did the page change?
+ *   retryable safe to run again without duplicating a side effect
+ * Callers must never retry outcome=applied blindly: a second submit/click
+ * would be applied twice.
+ */
+class XbError extends Error {
+  constructor(code, message, opts) {
+    super(message);
+    const o = opts || {};
+    this.name = 'XbError';
+    this.code = code;
+    this.outcome = o.outcome || 'not_started';
+    this.retryable = !!o.retryable;
+  }
+}
+
+function fail(code, message, opts) { return new XbError(code, message, opts); }
+
+const ERROR_PATTERNS = [
+  [/unknown command/i, 'unsupported_method'],
+  [/no active tab/i, 'no_target_tab'],
+  [/No tab with id|Invalid tab ID|tab was closed|Tab not found/i, 'no_target_tab'],
+  [/Cannot access contents of|The extensions gallery cannot be scripted|chrome:\/\/|edge:\/\/|Cannot access a/i, 'restricted_page'],
+  [/re-run snapshot|no element with data-xb-ref|element not found|selector not found|no longer available/i, 'target_not_found'],
+  [/timeout|timed out/i, 'timeout'],
+  [/stale|generation/i, 'stale_generation'],
+  [/not owned|another (client|session)/i, 'tab_not_owned'],
+  [/already attached|Another debugger|debugger is not attached|Detached while/i, 'debugger_conflict'],
+  [/requires|required|must be one of|invalid|unsupported/i, 'invalid_params']
+];
+
+function classifyError(message) {
+  for (const [re, code] of ERROR_PATTERNS) if (re.test(message)) return code;
+  return 'command_failed';
+}
+
+function errorPayload(e) {
+  if (e instanceof XbError) {
+    return { code: e.code, message: e.message, outcome: e.outcome, retryable: e.retryable };
+  }
+  const message = (e && e.message) ? e.message : String(e);
+  const code = classifyError(message);
+  return {
+    code,
+    message,
+    // a command that threw before replying has not changed the page, unless the
+    // failure says otherwise (timeouts leave the outcome genuinely unknown)
+    outcome: code === 'timeout' ? 'unknown' : 'not_started',
+    retryable: code === 'timeout' || code === 'debugger_conflict'
+  };
+}
+
 /* ------------------------------------------------------------------ socket */
 
 function connect() {
@@ -68,7 +125,7 @@ function retry() {
 
 function reply(id, ok, payload) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const msg = ok ? { id, ok: true, result: payload } : { id, ok: false, error: String(payload) };
+  const msg = ok ? { id, ok: true, result: payload } : { id, ok: false, error: payload };
   ws.send(JSON.stringify(msg));
 }
 
@@ -79,12 +136,15 @@ async function handle(msg) {
   const id = msg.id;
   try {
     const fn = COMMANDS[msg.cmd];
-    if (!fn) throw new Error(`unknown command: ${msg.cmd}`);
+    if (!fn) throw fail('unsupported_method', `unknown command: ${msg.cmd}`);
     const result = await fn(msg.args || {});
+    if (result && result.ok === false && result.error) throw result.error;
     reply(id, true, result);
   } catch (e) {
     stats.errors += 1;
-    reply(id, false, (e && e.message) ? e.message : String(e));
+    const payload = errorPayload(e);
+    stats.lastError = payload;
+    reply(id, false, payload);
   }
 }
 
