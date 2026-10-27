@@ -1,9 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "xb — Edge/Chromium Agent Bridge",
-  "version": "0.3.0",
-  "description": "Local agent bridge for Edge/Chromium: tab groups, control markers, leases and page control over 127.0.0.1 WebSocket.",
+  "name": "xb bridge",
+  "version": "0.3.1",
+  "description": "让你的 AI agent 在自己的标签页里干活：受控标签有可见标记，租约防止互相抢，动作可批量下发。命令行：xb",
   "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "permissions": [
     "tabs",
     "tabGroups",
@@ -31,7 +37,12 @@
     "type": "module"
   },
   "action": {
-    "default_title": "xb bridge — 点击查看受控标签",
-    "default_popup": "popup.html"
+    "default_title": "xb bridge · 点开看受控标签",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
   }
 }

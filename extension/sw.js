@@ -268,6 +268,7 @@ async function panelState() {
   rows.sort((a, b) => (a.windowId - b.windowId) || (a.tabId - b.tabId));
   return {
     version: chrome.runtime.getManifest().version,
+    name: chrome.runtime.getManifest().name,
     connected: !!(ws && ws.readyState === WebSocket.OPEN),
     wsPort: WS_PORT,
     totals: { tabs: all.length, marked: MARKS.size, leased: LEASES.size },
@@ -869,12 +870,17 @@ function _fFavicon(o) {
   c.width = 32; c.height = 32;
   const g = c.getContext('2d');
   if (g) {
+    // same mark as the toolbar icon: teal disc with a rounded white X
     g.fillStyle = p.color || '#0d9488';
     g.beginPath(); g.arc(16, 16, 15, 0, Math.PI * 2); g.fill();
-    g.fillStyle = '#eafff8';
-    g.font = 'bold 19px -apple-system,system-ui,sans-serif';
-    g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.fillText('x', 16, 17);
+    g.strokeStyle = '#ffffff';
+    g.lineWidth = 3.4;
+    g.lineCap = 'round';
+    const arm = 7.2;
+    g.beginPath();
+    g.moveTo(16 - arm, 16 - arm); g.lineTo(16 + arm, 16 + arm);
+    g.moveTo(16 + arm, 16 - arm); g.lineTo(16 - arm, 16 + arm);
+    g.stroke();
   }
   const href = g ? c.toDataURL('image/png') : '';
   if (!href) return { favicon: 'unsupported' };
@@ -1923,6 +1929,13 @@ const COMMANDS = {
   /* ---- panel: what the popup shows ---- */
 
   async 'panel.state'() { return await panelState(); },
+
+  /* dev-only: re-read the extension from disk after editing manifest/icons.
+   * The reply goes out first; the worker then kills itself and Chrome reloads it. */
+  async 'dev.reload'() {
+    setTimeout(() => { try { chrome.runtime.reload(); } catch (e) { /* ignore */ } }, 250);
+    return { reloading: true, version: chrome.runtime.getManifest().version };
+  },
 
   async 'panel.focus'(a) {
     if (a.tabId === undefined) throw fail('invalid_params', 'tabId required');

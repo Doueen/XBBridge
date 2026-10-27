@@ -29,9 +29,12 @@ bsk（[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)，MIT）�
 # 1) 扩展：必须选 edge-agent\extension 这一层，不是仓库根目录
 edge://extensions  ->  开发人员模式  ->  加载解压缩的扩展  ->  C:\WorkSpace\HermesWorkSpace\edge-agent\extension
 # 2) 自检
-python xb.py status      # 期望：extension: connected  v0.3.0
+python xb.py status      # 期望：extension: connected  v0.3.1
 ```
 
+> 扩展在 Edge 里显示为 **xb bridge**（teal 圆角方块 + 白色 X，和受控标签的 favicon 是同一个符号）。
+> 改完 `manifest.json` 或图标后，`edge://extensions` 点该卡片的"重新加载"，或者 `python xb.py ext-reload`。
+>
 > 选成仓库根目录（`...\edge-agent`）会报
 > `Cannot load extension with file or directory name __pycache__. Filenames starting with "_" are reserved`——
 > 根目录里有 `bridge/`、`test/`、`xb.py` 和 Python 的 `__pycache__`，只有 `extension/` 是扩展本体（4 个文件：`manifest.json` / `sw.js` / `popup.html` / `popup.js`）。
@@ -69,6 +72,7 @@ xb claim --tab 12 --label "抓禅道" [--ttl 300]     # 之后同 tab 的命令�
 xb leases                                          # 谁占着哪些标签、还剩多久
 xb release --tab 12 | --all
 xb panel                                           # 与扩展工具栏面板同一份快照
+xb ext-reload                                      # 开发用：改完 manifest/图标后让扩展从磁盘重载
 
 # 等待（bsk 的可靠性核心）
 xb wait-ms 500

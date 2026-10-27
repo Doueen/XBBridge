@@ -427,6 +427,7 @@ def build_parser() -> argparse.ArgumentParser:
     rl.add_argument("--tab", type=int); rl.add_argument("--all", action="store_true")
     sub.add_parser("leases", help="list active claims")
     sub.add_parser("panel", help="tabs the agent controls (same view as the toolbar popup)")
+    sub.add_parser("ext-reload", help="reload the unpacked extension from disk (dev: picks up manifest/icon edits)")
 
     return p
 
@@ -820,7 +821,7 @@ def main(argv=None) -> int:
             state = "connected" if st.get("connected") else "NOT connected"
             t = st.get("totals") or {}
             w = st.get("worker") or {}
-            print(f"xb {st.get('version')}  bridge {state}  :{st.get('wsPort')}  "
+            print(f"{st.get('name') or 'xb'} {st.get('version')}  bridge {state}  :{st.get('wsPort')}  "
                   f"{t.get('tabs', 0)} tab(s), {t.get('marked', 0)} marked, {t.get('leased', 0)} leased"
                   f"  ·  worker boots {w.get('boots', 0)} cmds {w.get('cmds', 0)} errors {w.get('errors', 0)}")
             rows = st.get("rows") or []
@@ -837,6 +838,9 @@ def main(argv=None) -> int:
                     bits.append("休眠")
                 print(f"  {r['tabId']:>7}  {' '.join(bits):<28} {r.get('label') or r.get('title') or ''}"
                       f"  [{_host(r.get('url'))}]")
+    elif args.cmd == "ext-reload":
+        emit(rpc("dev.reload", {}), j,
+             lambda r: print(f"reloading extension v{r.get('version')} from disk — it should reconnect in a few seconds"))
     return 0
 
 
