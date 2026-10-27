@@ -327,10 +327,19 @@ def build_parser() -> argparse.ArgumentParser:
     nw.add_argument("--clear", action="store_true")
 
     # capture
-    sh = sub.add_parser("screenshot"); sh.add_argument("out"); sh.add_argument("--tab", type=int)
-    sh.add_argument("--full", action="store_true"); sh.add_argument("--ref"); sh.add_argument("--selector")
-    sh2 = sub.add_parser("shot"); sh2.add_argument("out"); sh2.add_argument("--tab", type=int)
-    sh2.add_argument("--full", action="store_true")
+    for nm in ("screenshot", "shot"):
+        sh = sub.add_parser(nm, help="capture the tab (viewport, full page, clip or element)")
+        sh.add_argument("out")
+        sh.add_argument("--tab", type=int)
+        sh.add_argument("--full", action="store_true", help="whole scrollable page")
+        sh.add_argument("--ref"); sh.add_argument("--selector")
+        sh.add_argument("--clip", help="x,y,width,height in CSS pixels")
+        sh.add_argument("--format", choices=["png", "jpeg"], default="png")
+        sh.add_argument("--quality", type=int, help="jpeg quality 1-100 (default 80)")
+        sh.add_argument("--scale-to", type=int, dest="scale_to", default=None,
+                        help="max output dimension in CSS px (default 2000)")
+        sh.add_argument("--foreground", action="store_true",
+                        help="allow the captureVisibleTab fallback to bring the tab to the front")
 
     em = sub.add_parser("emulate"); em.add_argument("--tab", type=int); em.add_argument("--width", type=int)
     em.add_argument("--height", type=int); em.add_argument("--desktop", action="store_true")
@@ -581,16 +590,24 @@ def main(argv=None) -> int:
     # ---- capture ----
     elif args.cmd in ("screenshot", "shot"):
         ai = {"tabId": tab, "full": getattr(args, "full", False),
-              "ref": getattr(args, "ref", None), "selector": getattr(args, "selector", None)}
+              "ref": getattr(args, "ref", None), "selector": getattr(args, "selector", None),
+              "clip": getattr(args, "clip", None), "format": getattr(args, "format", "png"),
+              "quality": getattr(args, "quality", None),
+              "maxDimension": getattr(args, "scale_to", None),
+              "foreground": True if getattr(args, "foreground", False) else None}
         r = rpc("screenshot", ai, timeout=120)
         b64 = r.get("base64") or (r.get("dataUrl") or "").split(",", 1)[1]
         with open(args.out, "wb") as f:
             f.write(base64.b64decode(b64))
+        info = {"out": args.out, "bytes": os.path.getsize(args.out), "via": r.get("via"),
+                "width": r.get("width"), "height": r.get("height"),
+                "css": {"w": r.get("cssWidth"), "h": r.get("cssHeight")},
+                "scale": r.get("scale"), "format": r.get("format")}
         if j:
-            print(json.dumps({"out": args.out, "bytes": os.path.getsize(args.out), "via": r.get("via")},
-                             ensure_ascii=False))
+            print(json.dumps(info, ensure_ascii=False))
         else:
-            print(f"screenshot -> {args.out} ({os.path.getsize(args.out)} bytes, via {r.get('via')})")
+            dims = f"{r.get('width')}x{r.get('height')}px" if r.get("width") else "?"
+            print(f"screenshot -> {args.out} ({info['bytes']}B, {dims}, via {r.get('via')})")
     elif args.cmd == "emulate":
         if args.off:
             emit(rpc("emulate", {"tabId": tab, "off": True}), j, lambda r: print("emulation off"))

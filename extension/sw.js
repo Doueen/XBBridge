@@ -526,6 +526,20 @@ function _fObserve() {
 
 function _fViewport() { return { w: window.innerWidth, h: window.innerHeight, y: Math.round(window.scrollY) }; }
 
+function _fPageBox(sel) {
+  const el = document.querySelector(sel);
+  if (!el) return { error: 'element not found: ' + sel };
+  el.scrollIntoView({ block: 'center', inline: 'center' });
+  const r = el.getBoundingClientRect();
+  return {
+    x: r.left + window.scrollX, y: r.top + window.scrollY,
+    w: r.width, h: r.height,
+    dpr: window.devicePixelRatio || 1,
+    doc: { w: Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0),
+           h: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0) }
+  };
+}
+
 function _fCenter() { return { x: Math.round(window.innerWidth / 2), y: Math.round(window.innerHeight / 2) }; }
 
 function _fHelpOverlay(message, id) {
@@ -1524,24 +1538,80 @@ const COMMANDS = {
   async 'page.screenshot'(a) {
     const tab = await getTab(a.tabId);
     const fmt = a.format === 'jpeg' ? 'jpeg' : 'png';
-    const params = { format: fmt };
-    if (fmt === 'jpeg') params.quality = a.quality ? Number(a.quality) : 80;
+    const maxDim = a.maxDimension === undefined ? 2000 : Math.max(100, Number(a.maxDimension));
+    const full = a.full === true;
+    let clip = null;
+
     try {
-      if (a.full) {
-        const m = await withDebugger(tab.id, (t) => chrome.debugger.sendCommand(t, 'Page.getLayoutMetrics', {}));
-        const size = m.cssContentSize || m.contentSize;
-        params.clip = { x: 0, y: 0, width: Math.ceil(size.width), height: Math.ceil(size.height), scale: 1 };
-        params.captureBeyondViewport = true;
+      const metrics = await withDebugger(tab.id, (t) => chrome.debugger.sendCommand(t, 'Page.getLayoutMetrics', {}));
+      const viewport = metrics.cssVisualViewport || metrics.visualViewport || {};
+      const content = metrics.cssContentSize || metrics.contentSize || {};
+
+      if (a.ref || a.selector) {
+        const sel = parseRef(a.ref) ? refSelector(parseRef(a.ref).i) : a.selector;
+        const box = await inject(tab.id, _fPageBox, [sel], parseRef(a.ref) ? parseRef(a.ref).frameId : 0);
+        if (box.error) throw fail('target_not_found', box.error);
+        clip = { x: box.x, y: box.y, width: box.w, height: box.h };
+      } else if (typeof a.clip === 'string' || a.clipSelector) {
+        const raw = a.clipSelector || a.clip;
+        const parts = String(raw).split(',').map((s) => Number(s.trim()));
+        if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) {
+          throw fail('invalid_params', 'clip must be "x,y,width,height" in CSS pixels');
+        }
+        clip = { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+      } else if (a.clip && typeof a.clip === 'object') {
+        clip = { x: Number(a.clip.x) || 0, y: Number(a.clip.y) || 0,
+                 width: Number(a.clip.width), height: Number(a.clip.height) };
       }
+
+      const area = clip || (full
+        ? { x: content.x || 0, y: content.y || 0, width: content.width, height: content.height }
+        : { x: viewport.pageX || 0, y: viewport.pageY || 0, width: viewport.clientWidth, height: viewport.clientHeight });
+
+      if (!area.width || !area.height) throw fail('invalid_params', 'the captured area has no size');
+      if (clip && full) throw fail('invalid_params', 'clip and full cannot be used together');
+
+      // output is capped by maxDim in CSS pixels; dpr is folded into scale so the
+      // PNG is exactly css*scale pixels instead of css*dpr (which used to be huge)
+      let dpr = 1;
+      try {
+        const r = await withDebugger(tab.id, (t) => chrome.debugger.sendCommand(t, 'Runtime.evaluate',
+          { expression: 'window.devicePixelRatio', returnByValue: true }));
+        const v = r && r.result && r.result.value;
+        if (typeof v === 'number' && v > 0) dpr = v;
+      } catch (e) { /* headless/odd pages: assume 1 */ }
+
+      const cssScale = Math.min(1, maxDim / Math.max(area.width, area.height));
+      const captureClip = { ...area, scale: cssScale / dpr };
+      const params = {
+        format: fmt,
+        clip: captureClip,
+        captureBeyondViewport: !!clip || full
+      };
+      if (fmt === 'jpeg') params.quality = a.quality === undefined ? 80 : Math.max(1, Math.min(100, Number(a.quality)));
+
       const res = await withDebugger(tab.id, (t) => chrome.debugger.sendCommand(t, 'Page.captureScreenshot', params));
-      return { tabId: tab.id, via: 'cdp', format: fmt, base64: res.data };
+      if (!res || !res.data) throw fail('capture_failed', 'the page produced no screenshot data');
+      return {
+        tabId: tab.id, via: 'cdp', format: fmt, base64: res.data,
+        width: Math.round(area.width * cssScale), height: Math.round(area.height * cssScale),
+        cssWidth: Math.round(area.width), cssHeight: Math.round(area.height),
+        scale: Number((cssScale / dpr).toFixed(4)), devicePixelRatio: dpr,
+        full: full || undefined, clip: clip || undefined
+      };
     } catch (e) {
-      if (a.fallback === false) throw e;
-      // fall back to the visible-tab capture (needs the tab to be front-most)
+      if (a.fallback === false || !(e instanceof Error) || e.code) throw e;
+      // captureVisibleTab needs the tab to be front-most. Doing that silently is
+      // exactly the "the agent yanked my tab" complaint, so it is opt-in only.
+      if (a.foreground !== true) {
+        throw fail('capture_unavailable',
+          'CDP capture failed and the fallback would need to bring this tab to the front; '
+          + 'pass foreground=true to allow that', { retryable: true });
+      }
       await chrome.tabs.update(tab.id, { active: true });
       const dataUrl = await Promise.race([
         chrome.tabs.captureVisibleTab(tab.windowId, { format: fmt }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('captureVisibleTab timed out')), 15000))
+        new Promise((_, rej) => setTimeout(() => rej(fail('timeout', 'captureVisibleTab timed out', { retryable: true })), 15000))
       ]);
       return { tabId: tab.id, via: 'captureVisibleTab', format: fmt, dataUrl };
     }
