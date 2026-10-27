@@ -1,0 +1,5 @@
+.xb/
+test/dl/
+test/shot.png
+__pycache__/
+*.pyc

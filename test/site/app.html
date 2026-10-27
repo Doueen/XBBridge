@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xb 全功能测试台</title>
+<style>
+  body { font: 15px/1.6 system-ui, sans-serif; margin: 24px; }
+  section { border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; margin: 12px 0; }
+  h2 { margin: 6px 0; font-size: 16px; }
+  table { border-collapse: collapse; }
+  td, th { border: 1px solid #ccc; padding: 4px 10px; }
+  #hoverout { display: none; color: #b00; }
+  #hoverme:hover + #hoverout { display: block; }
+  .spacer { height: 1400px; background: linear-gradient(#fff, #eee); }
+</style>
+</head>
+<body>
+<h1>xb 全功能测试台</h1>
+
+<section>
+  <h2>1. 等待 / 惰性元素</h2>
+  <p id="delayed" style="display:none">惰性元素已出现</p>
+  <button id="btn-slow" onclick="setTimeout(()=>{document.getElementById('delayed').style.display='block'},800)">0.8 秒后显示</button>
+</section>
+
+<section>
+  <h2>2. 表单 / 回车提交</h2>
+  <form action="/submitted.html" method="get">
+    <input id="q" name="q" placeholder="输入后按回车" style="width:260px">
+    <button type="submit" id="btn-submit">提交</button>
+  </form>
+</section>
+
+<section>
+  <h2>3. 下拉 / 复选框</h2>
+  <select id="fruit">
+    <option value="apple">苹果</option>
+    <option value="banana">香蕉</option>
+    <option value="cherry">樱桃</option>
+  </select>
+  <label><input type="checkbox" id="chk"> 同意</label>
+  <p>当前选择：<span id="selout">apple</span></p>
+  <script>document.getElementById('fruit').addEventListener('change', e => {
+    document.getElementById('selout').textContent = e.target.value; });</script>
+</section>
+
+<section>
+  <h2>4. 悬停</h2>
+  <span id="hoverme">把鼠标放我身上</span>
+  <div id="hoverout">悬停生效了</div>
+</section>
+
+<section>
+  <h2>5. console / network</h2>
+  <button id="btn-log" onclick="
+    console.log('xb-test-log', 42);
+    console.warn('xb-test-warn');
+    fetch('/data.json').then(r=>r.json()).then(d=>console.log('fetched', d.ok));
+  ">打印日志并请求 data.json</button>
+</section>
+
+<section>
+  <h2>6. 文件上传 / 下载</h2>
+  <input type="file" id="file">
+  <a id="dl" href="/files/report.csv" download>下载 report.csv</a>
+</section>
+
+<section>
+  <h2>7. 表格抽取</h2>
+  <table id="tbl">
+    <thead><tr><th>项目</th><th>状态</th><th>负责人</th></tr></thead>
+    <tbody>
+      <tr><td>登录</td><td>通过</td><td>甲</td></tr>
+      <tr><td>下单</td><td>阻塞</td><td>乙</td></tr>
+      <tr><td>退款</td><td>通过</td><td>丙</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<div class="spacer"></div>
+<p id="bottom">页面底部</p>
+</body>
+</html>
