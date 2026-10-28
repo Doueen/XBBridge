@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh">
+<html>
 <head>
 <meta charset="utf-8">
 <title>XBBridge</title>
@@ -50,6 +50,10 @@
     position: sticky; bottom: 0; background: var(--bg);
   }
   footer button { flex: 1; padding: 6px 8px; }
+  .safety { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .safety button { font-size: 12px; padding: 4px 10px; }
+  .safety button.on { background: #b42318; color: #fff; border-color: #b42318; }
+  .blocked { font-size: 11px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -59,14 +63,18 @@
     <h1>XBBridge</h1>
     <span id="ver" class="ver">v—</span>
   </div>
-  <div id="totals" class="totals">连接状态读取中…</div>
+  <div id="totals" class="totals" data-i18n="connectStatus">…</div>
+  <div id="safety" class="safety">
+    <button id="pause" data-i18n="pause" data-i18n-title="pauseTitle">Pause</button>
+    <span id="blocked" class="blocked"></span>
+  </div>
 </header>
 
 <div id="rows" class="rows"></div>
 
 <footer>
-  <button id="unmark-all">全部取消标记</button>
-  <button id="reconnect">重连桥</button>
+  <button id="unmark-all" data-i18n="unmarkAll">Clear marks</button>
+  <button id="reconnect" data-i18n="reconnect">Reconnect</button>
 </footer>
 
 <script src="popup.js"></script>

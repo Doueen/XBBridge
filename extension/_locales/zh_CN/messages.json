@@ -1,0 +1,114 @@
+{
+  "extName": {
+    "message": "XBBridge"
+  },
+  "extDesc": {
+    "message": "让你的局部 CLI agent 在你自己的 Edge 标签里干活：命名标签组、可见控制标记、标签租约。命令行：xb"
+  },
+  "actionTitle": {
+    "message": "XBBridge · 点开看受控标签"
+  },
+  "connectStatus": {
+    "message": "连接状态读取中…"
+  },
+  "connected": {
+    "message": "已连接 :$PORT$ · $TABS$ 个标签 · 受控 $MARKED$ · 租约 $LEASED$",
+    "placeholders": {
+      "port": {
+        "content": "$1"
+      },
+      "tabs": {
+        "content": "$2"
+      },
+      "marked": {
+        "content": "$3"
+      },
+      "leased": {
+        "content": "$4"
+      }
+    }
+  },
+  "notConnected": {
+    "message": "未连接守护进程"
+  },
+  "pause": {
+    "message": "暂停 agent"
+  },
+  "pauseTitle": {
+    "message": "暂停后任何 agent 命令都会被拒绝"
+  },
+  "resume": {
+    "message": "恢复 agent"
+  },
+  "blockedNone": {
+    "message": "未屏蔽任何站点"
+  },
+  "blockedCount": {
+    "message": "已屏蔽 $COUNT$ 个站点",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "unmarkAll": {
+    "message": "全部取消标记"
+  },
+  "reconnect": {
+    "message": "重连桥"
+  },
+  "emptyBridge": {
+    "message": "桥没连上"
+  },
+  "emptyBridgeHint": {
+    "message": "本机 8787 端口没有守护进程。先跑一条 xb 命令把桥拉起来，再点\"重连桥\"。"
+  },
+  "emptyTabs": {
+    "message": "没有受控标签"
+  },
+  "emptyTabsHint": {
+    "message": "xb 还没有碰过任何标签。被 click / fill / claim 碰过的标签会出现在这里。"
+  },
+  "bringForward": {
+    "message": "切到前台"
+  },
+  "alreadyActive": {
+    "message": "已在前台"
+  },
+  "chipMarked": {
+    "message": "受控"
+  },
+  "chipLease": {
+    "message": "租约 $SECONDS$s",
+    "placeholders": {
+      "seconds": {
+        "content": "$1"
+      }
+    }
+  },
+  "chipGen": {
+    "message": "gen $GEN$",
+    "placeholders": {
+      "gen": {
+        "content": "$1"
+      }
+    }
+  },
+  "dormant": {
+    "message": "已休眠"
+  },
+  "release": {
+    "message": "释放"
+  },
+  "unmark": {
+    "message": "取消标记"
+  },
+  "readFailed": {
+    "message": "读取失败：$ERR$",
+    "placeholders": {
+      "err": {
+        "content": "$1"
+      }
+    }
+  }
+}

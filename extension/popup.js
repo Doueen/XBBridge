@@ -6,8 +6,29 @@ const dot = document.getElementById('dot');
 const ver = document.getElementById('ver');
 const totals = document.getElementById('totals');
 const rowsEl = document.getElementById('rows');
+const pauseBtn = document.getElementById('pause');
+const blockedEl = document.getElementById('blocked');
 
 let busy = false;
+
+/* i18n: every visible string comes from _locales so the store listing can
+ * ship English and Chinese without a second build. */
+function t(key, ...subs) {
+  let msg = '';
+  try { msg = chrome.i18n.getMessage(key, subs.map(String)) || ''; } catch (e) { msg = ''; }
+  return msg || key;
+}
+
+function localizeStatic() {
+  document.querySelectorAll('[data-i18n]').forEach((node) => {
+    const msg = t(node.getAttribute('data-i18n'));
+    if (msg && msg !== node.getAttribute('data-i18n')) node.textContent = msg;
+  });
+  document.querySelectorAll('[data-i18n-title]').forEach((node) => {
+    const msg = t(node.getAttribute('data-i18n-title'));
+    if (msg && msg !== node.getAttribute('data-i18n-title')) node.title = msg;
+  });
+}
 
 function send(op, extra) {
   return chrome.runtime.sendMessage(Object.assign({ xb: true, op }, extra || {}));
@@ -28,11 +49,9 @@ function renderEmpty(state) {
   rowsEl.replaceChildren();
   const box = el('div', 'empty');
   if (!state.connected) {
-    box.append(el('strong', '', '桥没连上'),
-               el('p', '', '本机 8787 端口没有守护进程。先跑一条 xb 命令把桥拉起来，再点"重连桥"。'));
+    box.append(el('strong', '', t('emptyBridge')), el('p', '', t('emptyBridgeHint')));
   } else {
-    box.append(el('strong', '', '没有受控标签'),
-               el('p', '', 'xb 还没有碰过任何标签。被 click / fill / claim 碰过的标签会出现在这里。'));
+    box.append(el('strong', '', t('emptyTabs')), el('p', '', t('emptyTabsHint')));
   }
   rowsEl.append(box);
 }
@@ -40,15 +59,17 @@ function renderEmpty(state) {
 function renderRow(row) {
   const wrap = el('div', 'row');
   wrap.append(el('div', 'title', row.label || row.title || `tab ${row.tabId}`));
-  wrap.append(el('div', 'url', `${host(row.url)}${row.discarded ? ' · 已休眠' : ''}`));
+  wrap.append(el('div', 'url', `${host(row.url)}${row.discarded ? ' · ' + t('dormant') : ''}`));
 
   const meta = el('div', 'meta');
-  if (row.marked) meta.append(el('span', 'chip', '受控'));
-  if (row.lease) meta.append(el('span', 'chip warn', `租约 ${Math.round(row.lease.expiresInMs / 1000)}s`));
-  meta.append(el('span', 'chip', `gen ${row.generation}`));
+  if (row.marked) meta.append(el('span', 'chip', t('chipMarked')));
+  if (row.lease) {
+    meta.append(el('span', 'chip warn', t('chipLease', Math.round(row.lease.expiresInMs / 1000))));
+  }
+  meta.append(el('span', 'chip', t('chipGen', row.generation)));
   meta.append(el('span', 'spacer'));
 
-  const focus = el('button', '', row.active ? '已在前台' : '切到前台');
+  const focus = el('button', '', row.active ? t('alreadyActive') : t('bringForward'));
   focus.disabled = row.active;
   focus.addEventListener('click', async () => {
     if (busy) return;
@@ -59,7 +80,7 @@ function renderRow(row) {
     } finally { busy = false; }
   });
 
-  const drop = el('button', '', row.lease ? '释放' : '取消标记');
+  const drop = el('button', '', row.lease ? t('release') : t('unmark'));
   drop.addEventListener('click', async () => {
     if (busy) return;
     busy = true;
@@ -75,15 +96,29 @@ function renderRow(row) {
   return wrap;
 }
 
+function renderSafety(state) {
+  const paused = state && state.paused === true;
+  if (pauseBtn) {
+    pauseBtn.textContent = paused ? t('resume') : t('pause');
+    pauseBtn.classList.toggle('on', paused);
+  }
+  if (blockedEl) {
+    const n = (state && state.blocked ? state.blocked.length : 0);
+    blockedEl.textContent = n ? t('blockedCount', n) : t('blockedNone');
+  }
+}
+
 function render(state) {
   if (!state) return;
+  renderSafety(state);
   ver.textContent = state.label ? `${state.label} · v${state.version}` : `v${state.version}`;
   ver.title = `instance ${state.instanceId || '?'} — xb --browser 可用这个 id 或上面的名字`;
   dot.classList.toggle('on', !!state.connected);
   const t = state.totals || {};
+  const counts = state.totals || {};
   totals.textContent = state.connected
-    ? `已连接 :${state.wsPort} · ${t.tabs ?? 0} 个标签 · 受控 ${t.marked ?? 0} · 租约 ${t.leased ?? 0}`
-    : '未连接守护进程';
+    ? t('connected', state.wsPort, counts.tabs ?? 0, counts.marked ?? 0, counts.leased ?? 0)
+    : t('notConnected');
 
   if (!state.rows || !state.rows.length) {
     renderEmpty(state);
@@ -96,9 +131,9 @@ async function refresh() {
   try {
     const res = await send('state');
     if (res && res.ok) render(res.result);
-    else totals.textContent = `读取失败：${(res && res.error) || 'unknown'}`;
+    else totals.textContent = t('readFailed', (res && res.error) || 'unknown');
   } catch (e) {
-    totals.textContent = `读取失败：${e.message}`;
+    totals.textContent = t('readFailed', e.message);
   }
 }
 
@@ -112,5 +147,6 @@ document.getElementById('reconnect').addEventListener('click', async () => {
   if (res && res.ok) render(res.result);
 });
 
+localizeStatic();
 refresh();
 setInterval(refresh, 2000);

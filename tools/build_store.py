@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import sys
+import re
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -57,8 +58,29 @@ def validate(dest: str) -> dict:
             raise SystemExit(f"manifest: missing {field}")
     if man["manifest_version"] != 3:
         raise SystemExit("manifest: must be MV3")
-    if len(man.get("description", "")) > 132:
-        raise SystemExit(f"manifest: description is {len(man['description'])} chars, store limit is 132")
+
+    # name / description / action title are __MSG_*__ refs now: validate the
+    # localized text the store will actually show, and that the default locale
+    # defines every key the manifest mentions.
+    default_locale = man.get("default_locale")
+    if not default_locale:
+        raise SystemExit("manifest: default_locale missing while using __MSG_ refs")
+    loc_path = os.path.join(dest, "_locales", default_locale, "messages.json")
+    if not os.path.exists(loc_path):
+        raise SystemExit(f"manifest: {loc_path} missing")
+    messages = json.load(open(loc_path, encoding="utf-8"))
+    refs = set(re.findall(r"__MSG_(\w+)__", json.dumps(man, ensure_ascii=False)))
+    missing = sorted(r for r in refs if r not in messages)
+    if missing:
+        raise SystemExit(f"_locales/{default_locale}: undefined message(s) {missing}")
+    desc = messages.get("extDesc", {}).get("message", "")
+    if len(desc) > 132:
+        raise SystemExit(f"description is {len(desc)} chars, store limit is 132")
+    for loc in sorted(os.listdir(os.path.join(dest, "_locales"))):
+        other = json.load(open(os.path.join(dest, "_locales", loc, "messages.json"), encoding="utf-8"))
+        gap = sorted(set(messages) ^ set(other))
+        if gap:
+            raise SystemExit(f"_locales/{loc}: key mismatch vs {default_locale}: {gap}")
 
     icons = list((man.get("icons") or {}).values())
     icons += list(((man.get("action") or {}).get("default_icon") or {}).values())

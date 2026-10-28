@@ -153,6 +153,82 @@ def main() -> int:
     check("snapshot carries roles", any(it["role"] == "combobox" for it in snap["items"]),
           ",".join(sorted({it["role"] for it in snap["items"]})))
 
+    print("== safety: blocked sites + pause ==")
+    st_tab = xb("open", f"{SITE}/app.html")["id"]
+    xb("wait-for-element", "#btn-slow", "--tab", st_tab)
+    xb("block", "127.0.0.1")
+    rc, err = xb_error("text", "--tab", st_tab)
+    check("a blocked host refuses tab commands", rc == 5 and err.get("code") == "site_blocked",
+          f"rc={rc} {err.get('code')}")
+    codes = xb("blocked")
+    check("blocked list survives a round trip", "127.0.0.1" in (codes.get("blocked") or []),
+          str(codes.get("blocked")))
+    xb("unblock", "127.0.0.1")
+    back = xb("text", "--tab", st_tab)
+    check("unblocking restores access", bool(back.get("text")), f"{len(back.get('text') or '')} chars")
+    xb("pause")
+    rc, err = xb_error("click", "#btn-slow", "--tab", st_tab)
+    check("pause refuses mutations", rc == 3 and err.get("code") == "paused",
+          f"rc={rc} {err.get('code')}")
+    pane = xb("panel")
+    check("panel reports the paused state", pane.get("paused") is True, str(pane.get("paused")))
+    xb("resume")
+    ok = xb("click", "#btn-slow", "--tab", st_tab)
+    check("resume lets commands through again", ok.get("clicked") is not None)
+    xb("close", st_tab)
+
+    print("== semantic locate ==")
+    lt = xb("open", f"{SITE}/list.html")["id"]
+    xb("wait-for-element", "#pageinfo", "--tab", lt)
+    found = xb("locate", "--text", "下一页", "--tab", lt)
+    check("locate finds an element by visible text",
+          found.get("found") is True and found.get("selector", "").startswith("[data-xb-locate="),
+          f"{found.get('name')!r} from {found.get('candidates')} candidate(s)")
+    by_label = xb("locate", "--label", "下一页", "--tab", lt)
+    check("locate works by aria-label / placeholder too", by_label.get("found") is True)
+    rc, err = xb_error("locate", "--text", "这个按钮不存在", "--tab", lt)
+    check("locate miss -> target_not_found", rc == 5 and err.get("code") == "target_not_found",
+          f"rc={rc} {err.get('code')}")
+
+    print("== network: wait / replay / har ==")
+    n_before = len(xb("network", "--tab", lt).get("requests") or [])
+    xb("click", "--text", "调用接口 data.json", "--tab", lt)
+    hit = xb("network", "--wait-pattern", "data.json", "--tab", lt, "--timeout", "8")
+    check("network --wait-pattern catches the request", hit.get("matched") is True,
+          f"index {hit.get('index')} after {hit.get('waitedMs')}ms")
+    if hit.get("matched"):
+        idx = hit["index"]
+        body = xb("network", "--body", str(idx), "--tab", lt)
+        check("network --body returns the response body", '"ok"' in (body.get("body") or ""),
+              (body.get("body") or "")[:60])
+        rep = xb("network", "--replay", str(idx), "--tab", lt)
+        check("network --replay re-issues it with the page session",
+              rep.get("ok") is True and '"ok"' in (rep.get("text") or ""),
+              f"{rep.get('status')} {rep.get('bytes')}B")
+    har_path = os.path.join(HERE, "har-check.json")
+    xb("network", "--har", har_path, "--tab", lt)
+    har = json.load(open(har_path, encoding="utf-8"))
+    entries = (har.get("log") or {}).get("entries") or []
+    check("network --har writes HAR 1.2 entries",
+          har["log"]["version"] == "1.2" and len(entries) >= 1
+          and any("data.json" in e["request"]["url"] for e in entries),
+          f"{len(entries)} entries")
+    os.remove(har_path)
+
+    print("== paginated extract ==")
+    merged = xb("extract", "--next", "#next", "--max-pages", "3", "--page-wait", "350", "--tab", lt)
+    rows = []
+    for tb in merged.get("tables") or []:
+        if any(h == "序号" for h in (tb.get("headers") or [])):
+            rows = tb.get("rows") or []
+    check("extract walks the next control and merges pages",
+          merged.get("pages") == 3 and len(rows) == 6,
+          f"pages={merged.get('pages')} rows={len(rows)}")
+    check("merged rows come from every page",
+          {r[1] for r in rows} >= {"登录", "退款", "开票"},
+          str([r[1] for r in rows]))
+    xb("close", lt)
+
     print("== console / network buffers ==")
     xb("console", "--tab", tab, "--clear")
     xb("network", "--tab", tab, "--clear")
@@ -292,6 +368,59 @@ def main() -> int:
     auto = xb("eval", "!!document.getElementById('xb-mark-root')", "--tab", tab)["value"]
     check("acting on a tab marks it automatically", auto is True, str(auto))
     xb("unmark", "--all")
+
+    print("== group branding / reuse ==")
+    g1 = xb("open", f"{SITE}/app.html", "--background", "--group-title", "ep 复用", "--color", "purple")
+    g2 = xb("open", f"{SITE}/beta.html", "--background", "--group-title", "ep 复用", "--color", "purple")
+    check("a second tab with the same title joins the same group",
+          g1["groupIdOfCreated"] == g2["groupIdOfCreated"] and g2.get("groupReused") is True,
+          f"{g1['groupIdOfCreated']} vs {g2['groupIdOfCreated']} reused={g2.get('groupReused')}")
+    same = [x for x in xb("group", "list") if x["title"] == "XB[ep 复用]"]
+    check("only one group carries that title",
+          len(same) == 1 and len(same[0]["tabs"]) == 2,
+          f"{len(same)} group(s), {len(same[0]['tabs']) if same else 0} tab(s)")
+    g3 = xb("open", f"{SITE}/gamma.html", "--background", "--group-title", "ep 复用",
+            "--color", "purple", "--new-group")
+    check("--new-group forces a separate group",
+          g3["groupIdOfCreated"] != g1["groupIdOfCreated"] and g3.get("groupReused") is False,
+          f"{g3['groupIdOfCreated']} vs {g1['groupIdOfCreated']}")
+    xb("close", f"{g1['id']},{g2['id']},{g3['id']}")
+
+    print("== shadow DOM ==")
+    sh = xb("open", f"{SITE}/shadow.html")["id"]
+    xb("wait-for-element", "#s-out", "--tab", sh)
+    snap = xb("snapshot", "--tab", sh)
+    items = snap.get("items") or []
+    check("snapshot reports the shadow roots it walked", (snap.get("shadowRoots") or 0) >= 2,
+          f"shadowRoots={snap.get('shadowRoots')}")
+    by_name = {i.get("name"): i for i in items}
+    check("snapshot sees a button inside a shadow root",
+          "影子按钮" in by_name and by_name["影子按钮"].get("inShadow") is True,
+          f"{len(items)} item(s)")
+    if "影子按钮" in by_name:
+        xb("click", by_name["影子按钮"]["ref"], "--tab", sh)
+        out = xb("eval", "document.getElementById('s-out').textContent", "--tab", sh)["value"]
+        check("click by @ref crosses the shadow boundary", out == "影子按钮被点击", str(out))
+    s_input = next((i for i in items if i.get("tag") == "input"
+                    and (i.get("type") or "text") == "text" and i.get("inShadow")), None)
+    if s_input:
+        xb("fill", s_input["ref"], "影子文本", "--tab", sh)
+        val = xb("eval", "document.getElementById('shadow-host').shadowRoot"
+                         ".getElementById('s-input').value", "--tab", sh)["value"]
+        check("fill by @ref reaches a shadow input", val == "影子文本", str(val))
+    s_sel = next((i for i in items if i.get("tag") == "select"), None)
+    if s_sel:
+        xb("select", s_sel["ref"], "--values", "yi", "--tab", sh)
+        val = xb("eval", "document.getElementById('shadow-host').shadowRoot"
+                         ".getElementById('s-select').value", "--tab", sh)["value"]
+        check("select by @ref reaches a shadow <select>", val == "yi", str(val))
+    if "两层嵌套按钮" in by_name:
+        xb("click", by_name["两层嵌套按钮"]["ref"], "--tab", sh)
+        out = xb("eval", "document.getElementById('n-out').textContent", "--tab", sh)["value"]
+        check("nested shadow roots (two levels) are reachable", out == "嵌套按钮被点击", str(out))
+    else:
+        check("nested shadow roots (two levels) are reachable", False, "button not in snapshot")
+    xb("close", sh)
 
     window_sane()
     print("== drag / trusted click ==")

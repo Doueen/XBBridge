@@ -1,0 +1,114 @@
+{
+  "extName": {
+    "message": "XBBridge"
+  },
+  "extDesc": {
+    "message": "Let a local CLI agent work in your own Edge tabs: named tab groups, visible control markers, tab leases. CLI: xb"
+  },
+  "actionTitle": {
+    "message": "XBBridge - see which tabs the agent controls"
+  },
+  "connectStatus": {
+    "message": "reading connection state..."
+  },
+  "connected": {
+    "message": "connected :$PORT$ - $TABS$ tab(s) - $MARKED$ controlled - $LEASED$ leased",
+    "placeholders": {
+      "port": {
+        "content": "$1"
+      },
+      "tabs": {
+        "content": "$2"
+      },
+      "marked": {
+        "content": "$3"
+      },
+      "leased": {
+        "content": "$4"
+      }
+    }
+  },
+  "notConnected": {
+    "message": "bridge not running"
+  },
+  "pause": {
+    "message": "Pause agent"
+  },
+  "pauseTitle": {
+    "message": "While paused, every agent command is refused"
+  },
+  "resume": {
+    "message": "Resume agent"
+  },
+  "blockedNone": {
+    "message": "no blocked sites"
+  },
+  "blockedCount": {
+    "message": "$COUNT$ site(s) blocked",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "unmarkAll": {
+    "message": "Clear all marks"
+  },
+  "reconnect": {
+    "message": "Reconnect"
+  },
+  "emptyBridge": {
+    "message": "Bridge not connected"
+  },
+  "emptyBridgeHint": {
+    "message": "No daemon on port 8787 yet. Run any xb command to start it, then press Reconnect."
+  },
+  "emptyTabs": {
+    "message": "No controlled tabs"
+  },
+  "emptyTabsHint": {
+    "message": "xb has not touched a tab yet. Tabs it clicks, fills or claims show up here."
+  },
+  "bringForward": {
+    "message": "Bring forward"
+  },
+  "alreadyActive": {
+    "message": "Already active"
+  },
+  "chipMarked": {
+    "message": "controlled"
+  },
+  "chipLease": {
+    "message": "lease $SECONDS$s",
+    "placeholders": {
+      "seconds": {
+        "content": "$1"
+      }
+    }
+  },
+  "chipGen": {
+    "message": "gen $GEN$",
+    "placeholders": {
+      "gen": {
+        "content": "$1"
+      }
+    }
+  },
+  "dormant": {
+    "message": "asleep"
+  },
+  "release": {
+    "message": "Release"
+  },
+  "unmark": {
+    "message": "Drop mark"
+  },
+  "readFailed": {
+    "message": "read failed: $ERR$",
+    "placeholders": {
+      "err": {
+        "content": "$1"
+      }
+    }
+  }
+}

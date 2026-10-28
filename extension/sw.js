@@ -207,6 +207,57 @@ function releaseAlive() {
   }
 }
 
+/* ---- safety: pause switch + blocked sites ---------------------------------
+ * Both are checked in one place (the dispatcher) so no command can slip past.
+ */
+const PAUSE_KEY = 'xbPaused';
+const BLOCK_KEY = 'xbBlocked';
+let PAUSED = false;
+let BLOCKED = [];              // host patterns, e.g. "*.bank.com" or "mail.google.com"
+
+const ALLOWED_WHILE_PAUSED = new Set([
+  'pause', 'resume', 'paused', 'block.list', 'block.add', 'block.remove',
+  'panel.state', 'panel.focus', 'panel.unmark', 'lease.list', 'doctor', 'ping',
+  'browser.info', 'marks'
+]);
+
+function hostMatches(url, pattern) {
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch (e) { return false; }
+  const pat = String(pattern || '').toLowerCase().trim();
+  if (!pat) return false;
+  if (pat.startsWith('*.')) {
+    const tail = pat.slice(2);
+    return host === tail || host.endsWith('.' + tail);
+  }
+  return host === pat || host.endsWith('.' + pat);
+}
+
+async function blockedFor(tabId) {
+  if (!BLOCKED.length) return null;
+  try {
+    const tab = await chrome.tabs.get(Number(tabId));
+    const url = tab && tab.url;
+    if (!url) return null;
+    const hit = BLOCKED.find((p) => hostMatches(url, p));
+    return hit ? { pattern: hit, url } : null;
+  } catch (e) { return null; }
+}
+
+async function loadSafety() {
+  try {
+    const got = await chrome.storage.local.get([PAUSE_KEY, BLOCK_KEY]);
+    PAUSED = got[PAUSE_KEY] === true;
+    BLOCKED = Array.isArray(got[BLOCK_KEY]) ? got[BLOCK_KEY].map(String) : [];
+  } catch (e) { /* storage unavailable: keep defaults */ }
+}
+loadSafety();
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (changes[PAUSE_KEY]) PAUSED = changes[PAUSE_KEY].newValue === true;
+  if (changes[BLOCK_KEY]) BLOCKED = (changes[BLOCK_KEY].newValue || []).map(String);
+});
+
 async function handle(msg) {
   stats.cmds += 1;
   stats.lastCmdAt = Date.now();
@@ -216,7 +267,18 @@ async function handle(msg) {
   try {
     const fn = COMMANDS[msg.cmd];
     if (!fn) throw fail('unsupported_method', `unknown command: ${msg.cmd}`);
-    const result = await fn(msg.args || {});
+    const args = msg.args || {};
+    if (PAUSED && !ALLOWED_WHILE_PAUSED.has(msg.cmd)) {
+      throw fail('paused', 'the agent is paused from the toolbar panel (xb resume to continue)');
+    }
+    if (BLOCKED.length && args.tabId !== undefined && args.tabId !== null) {
+      const hit = await blockedFor(args.tabId);
+      if (hit) {
+        throw fail('site_blocked',
+          `${hit.url} matches the blocked pattern ${hit.pattern} (xb blocked to review)`);
+      }
+    }
+    const result = await fn(args);
     if (result && result.ok === false && result.error) throw result.error;
     reply(id, true, result);
   } catch (e) {
@@ -324,6 +386,8 @@ async function panelState() {
     name: chrome.runtime.getManifest().name,
     instanceId: identity.id,
     label: identity.label,
+    paused: PAUSED,
+    blocked: BLOCKED.slice(),
     connected: !!(ws && ws.readyState === WebSocket.OPEN),
     wsPort: WS_PORT,
     totals: { tabs: all.length, marked: MARKS.size, leased: LEASES.size },
@@ -395,13 +459,43 @@ const COLORS = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cya
 /* injected page functions (must be self-contained) */
 
 function _pageText(sel) {
-  const el = sel ? document.querySelector(sel) : document.body;
+  const __dq = (sel) => {
+    let hit = null;
+    const seen = new Set();
+    const walk = (root) => {
+      if (hit || !root || !root.querySelector) return;
+      hit = root.querySelector(sel);
+      if (hit) return;
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); walk(el.shadowRoot); }
+      });
+    };
+    walk(document);
+    return hit;
+  };
+
+  const el = sel ? __dq(sel) : document.body;
   if (!el) return { error: 'selector not found: ' + sel };
   return { url: location.href, title: document.title, text: el.innerText || '' };
 }
 
 function _pageHtml(sel) {
-  const el = sel ? document.querySelector(sel) : document.documentElement;
+  const __dq = (sel) => {
+    let hit = null;
+    const seen = new Set();
+    const walk = (root) => {
+      if (hit || !root || !root.querySelector) return;
+      hit = root.querySelector(sel);
+      if (hit) return;
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); walk(el.shadowRoot); }
+      });
+    };
+    walk(document);
+    return hit;
+  };
+
+  const el = sel ? __dq(sel) : document.documentElement;
   if (!el) return { error: 'selector not found: ' + sel };
   return { url: location.href, title: document.title, html: el.outerHTML };
 }
@@ -446,7 +540,8 @@ function _pageClick(i) {
   el.scrollIntoView({ block: 'center', inline: 'center' });
   const r = el.getBoundingClientRect();
   const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-  const target = document.elementFromPoint(cx, cy) || el;
+  const rootOf = el.getRootNode && el.getRootNode().elementFromPoint ? el.getRootNode() : document;
+  const target = rootOf.elementFromPoint(cx, cy) || el;
   target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
   target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
   target.click();
@@ -654,13 +749,94 @@ function _fFindByLabel(marker) {
   return { rect: null };
 }
 
+async function _fReplay(spec) {
+  const o = spec || {};
+  const headers = Object.assign({}, o.headers || {});
+  for (const k of Object.keys(headers)) {
+    if (/^(content-length|host|origin|referer|cookie)$/i.test(k)) delete headers[k];
+  }
+  const opts = { method: o.method || 'GET', headers, credentials: 'include', cache: 'no-store' };
+  if (o.body !== null && o.body !== undefined && String(o.body).length) {
+    opts.body = String(o.body);
+    if (!Object.keys(headers).some((k) => k.toLowerCase() === 'content-type')) {
+      headers['content-type'] = 'application/json';
+    }
+  }
+  try {
+    const r = await fetch(o.url, opts);
+    const text = await r.text();
+    return { url: o.url, method: opts.method, status: r.status, ok: r.ok,
+             contentType: r.headers.get('content-type'), bytes: text.length,
+             text: text.slice(0, 200000) };
+  } catch (e) {
+    return { error: 'fetch failed: ' + (e && e.message ? e.message : String(e)) };
+  }
+}
+
+function _fLocate(o) {
+  const opt = o || {};
+  const want = String(opt.text || '').toLowerCase().trim();
+  const label = String(opt.label || '').toLowerCase().trim();
+  const tag = opt.tag ? String(opt.tag).toLowerCase() : '';
+  const exact = opt.exact === true;
+  const SEL = opt.selector || 'button,a,input,select,textarea,[role=button],[role=link],[role=tab],[role=menuitem],[role=checkbox],[role=switch],[contenteditable=true]';
+  const roots = [];
+  const collect = (r) => { roots.push(r); r.querySelectorAll('*').forEach((e) => { if (e.shadowRoot) collect(e.shadowRoot); }); };
+  collect(document);
+  const nameOf = (el) => (el.getAttribute('aria-label') || el.getAttribute('placeholder')
+      || el.getAttribute('title') || el.getAttribute('name') || el.value
+      || (el.innerText || el.textContent || '')).replace(/\s+/g, ' ').trim().toLowerCase();
+  const cands = [];
+  for (const r of roots) {
+    for (const el of r.querySelectorAll(SEL)) {
+      if (tag && el.tagName.toLowerCase() !== tag) continue;
+      const n = nameOf(el);
+      if (!n) continue;
+      const hitText = want && (exact ? n === want : n.includes(want));
+      const hitLabel = label && (exact ? n === label : n.includes(label));
+      if (!hitText && !hitLabel) continue;
+      const r2 = el.getBoundingClientRect();
+      if (!r2.width || !r2.height) continue;
+      const st = getComputedStyle(el);
+      if (st.visibility === 'hidden' || st.display === 'none' || st.opacity === '0') continue;
+      cands.push({ el, name: n, area: r2.width * r2.height });
+    }
+  }
+  if (!cands.length) return { found: false };
+  // 多个命中时取面积最小的那个：通常是真正的按钮，而不是包裹它的卡片
+  cands.sort((a, b) => a.area - b.area);
+  const pick = cands[0];
+  const token = 'l' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  pick.el.setAttribute('data-xb-locate', token);
+  return { found: true, selector: `[data-xb-locate="${token}"]`, name: pick.name,
+           candidates: cands.length, tag: pick.el.tagName.toLowerCase() };
+}
+
 function _fClickSel(sel) {
-  const el = document.querySelector(sel);
+  const __dq = (sel) => {
+    let hit = null;
+    const seen = new Set();
+    const walk = (root) => {
+      if (hit || !root || !root.querySelector) return;
+      hit = root.querySelector(sel);
+      if (hit) return;
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); walk(el.shadowRoot); }
+      });
+    };
+    walk(document);
+    return hit;
+  };
+
+  const el = __dq(sel);
   if (!el) return { error: 'element not found: ' + sel + ' (re-run snapshot)' };
   el.scrollIntoView({ block: 'center', inline: 'center' });
   const r = el.getBoundingClientRect();
   const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-  const target = document.elementFromPoint(cx, cy) || el;
+  // elementFromPoint 在 shadow 边界会做 retarget，返回宿主元素；用元素自己所在的
+  // root 去取点，才能拿到真正的目标（嵌套 shadow 也一样）
+  const rootOf = el.getRootNode && el.getRootNode().elementFromPoint ? el.getRootNode() : document;
+  const target = rootOf.elementFromPoint(cx, cy) || el;
   for (const type of ['mousedown', 'mouseup']) {
     target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
   }
@@ -669,7 +845,22 @@ function _fClickSel(sel) {
 }
 
 function _fFillSel(sel, text) {
-  const el = document.querySelector(sel);
+  const __dq = (sel) => {
+    let hit = null;
+    const seen = new Set();
+    const walk = (root) => {
+      if (hit || !root || !root.querySelector) return;
+      hit = root.querySelector(sel);
+      if (hit) return;
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); walk(el.shadowRoot); }
+      });
+    };
+    walk(document);
+    return hit;
+  };
+
+  const el = __dq(sel);
   if (!el) return { error: 'element not found: ' + sel + ' (re-run snapshot)' };
   el.scrollIntoView({ block: 'center' });
   el.focus();
@@ -686,7 +877,22 @@ function _fFillSel(sel, text) {
 }
 
 function _fSelect(sel, values) {
-  const el = document.querySelector(sel);
+  const __dq = (sel) => {
+    let hit = null;
+    const seen = new Set();
+    const walk = (root) => {
+      if (hit || !root || !root.querySelector) return;
+      hit = root.querySelector(sel);
+      if (hit) return;
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); walk(el.shadowRoot); }
+      });
+    };
+    walk(document);
+    return hit;
+  };
+
+  const el = __dq(sel);
   if (!el) return { error: 'element not found: ' + sel };
   if (el.tagName.toLowerCase() !== 'select') return { error: 'not a <select>: ' + el.tagName.toLowerCase() };
   const want = (Array.isArray(values) ? values : [values]).map(String);
@@ -702,14 +908,44 @@ function _fSelect(sel, values) {
 }
 
 function _fFocus(sel, on) {
-  const el = document.querySelector(sel);
+  const __dq = (sel) => {
+    let hit = null;
+    const seen = new Set();
+    const walk = (root) => {
+      if (hit || !root || !root.querySelector) return;
+      hit = root.querySelector(sel);
+      if (hit) return;
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); walk(el.shadowRoot); }
+      });
+    };
+    walk(document);
+    return hit;
+  };
+
+  const el = __dq(sel);
   if (!el) return { error: 'element not found: ' + sel };
   if (on) el.focus(); else el.blur();
   return { active: document.activeElement === el };
 }
 
 function _fScrollTo(sel) {
-  const el = document.querySelector(sel);
+  const __dq = (sel) => {
+    let hit = null;
+    const seen = new Set();
+    const walk = (root) => {
+      if (hit || !root || !root.querySelector) return;
+      hit = root.querySelector(sel);
+      if (hit) return;
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); walk(el.shadowRoot); }
+      });
+    };
+    walk(document);
+    return hit;
+  };
+
+  const el = __dq(sel);
   if (!el) return { error: 'element not found: ' + sel };
   el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
   const r = el.getBoundingClientRect();
@@ -718,10 +954,25 @@ function _fScrollTo(sel) {
 }
 
 function _fBox(sel) {
+  const __dq = (sel) => {
+    let hit = null;
+    const seen = new Set();
+    const walk = (root) => {
+      if (hit || !root || !root.querySelector) return;
+      hit = root.querySelector(sel);
+      if (hit) return;
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); walk(el.shadowRoot); }
+      });
+    };
+    walk(document);
+    return hit;
+  };
+
   if (window.innerWidth === 0 || window.innerHeight === 0) {
     return { error: 'viewport is 0x0 — the browser window is minimized or collapsed; restore it before using coordinates' };
   }
-  const el = document.querySelector(sel);
+  const el = __dq(sel);
   if (!el) return { error: 'element not found: ' + sel };
   el.scrollIntoView({ block: 'center', inline: 'center' });
   const r = el.getBoundingClientRect();
@@ -730,7 +981,22 @@ function _fBox(sel) {
 }
 
 function _fElementState(sel) {
-  const el = document.querySelector(sel);
+  const __dq = (sel) => {
+    let hit = null;
+    const seen = new Set();
+    const walk = (root) => {
+      if (hit || !root || !root.querySelector) return;
+      hit = root.querySelector(sel);
+      if (hit) return;
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); walk(el.shadowRoot); }
+      });
+    };
+    walk(document);
+    return hit;
+  };
+
+  const el = __dq(sel);
   if (!el) return { exists: false, visible: false };
   const r = el.getBoundingClientRect();
   const st = getComputedStyle(el);
@@ -741,8 +1007,23 @@ function _fElementState(sel) {
 }
 
 function _fWaitElement(sel, state, timeoutMs) {
+  const __dq = (sel) => {
+    let hit = null;
+    const seen = new Set();
+    const walk = (root) => {
+      if (hit || !root || !root.querySelector) return;
+      hit = root.querySelector(sel);
+      if (hit) return;
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); walk(el.shadowRoot); }
+      });
+    };
+    walk(document);
+    return hit;
+  };
+
   const test = () => {
-    const el = document.querySelector(sel);
+    const el = __dq(sel);
     const visible = !!el && (() => {
       const r = el.getBoundingClientRect();
       const st = getComputedStyle(el);
@@ -802,7 +1083,22 @@ function _fObserve() {
 function _fViewport() { return { w: window.innerWidth, h: window.innerHeight, y: Math.round(window.scrollY) }; }
 
 function _fPageBox(sel) {
-  const el = document.querySelector(sel);
+  const __dq = (sel) => {
+    let hit = null;
+    const seen = new Set();
+    const walk = (root) => {
+      if (hit || !root || !root.querySelector) return;
+      hit = root.querySelector(sel);
+      if (hit) return;
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); walk(el.shadowRoot); }
+      });
+    };
+    walk(document);
+    return hit;
+  };
+
+  const el = __dq(sel);
   if (!el) return { error: 'element not found: ' + sel };
   el.scrollIntoView({ block: 'center', inline: 'center' });
   const r = el.getBoundingClientRect();
@@ -820,17 +1116,34 @@ function _fCenter() { return { x: Math.round(window.innerWidth / 2), y: Math.rou
 /* Scroll to the element, then report where it really is and whether a real
  * mouse event at that point would actually land on it. */
 function _fTrustedBox(sel) {
+  const __dq = (sel) => {
+    let hit = null;
+    const seen = new Set();
+    const walk = (root) => {
+      if (hit || !root || !root.querySelector) return;
+      hit = root.querySelector(sel);
+      if (hit) return;
+      root.querySelectorAll('*').forEach((el) => {
+        if (el.shadowRoot && !seen.has(el.shadowRoot)) { seen.add(el.shadowRoot); walk(el.shadowRoot); }
+      });
+    };
+    walk(document);
+    return hit;
+  };
+
   if (window.innerWidth === 0 || window.innerHeight === 0) {
     return { error: 'viewport is 0x0 — the browser window is minimized or collapsed; restore it before using coordinates' };
   }
-  const el = document.querySelector(sel);
+  const el = __dq(sel);
   if (!el) return { error: 'element not found: ' + sel };
   el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
   const r = el.getBoundingClientRect();
   const x = Math.round(r.left + r.width / 2);
   const y = Math.round(r.top + r.height / 2);
-  const at = document.elementFromPoint(x, y);
-  const hit = !!at && (at === el || el.contains(at) || at.contains(el));
+  const rootOf = el.getRootNode && el.getRootNode().elementFromPoint ? el.getRootNode() : document;
+  const at = rootOf.elementFromPoint(x, y);
+  const hit = !!at && (at === el || el.contains(at) || at.contains(el)
+                       || (at.getRootNode() && at.getRootNode().host === el));
   return { x, y, w: Math.round(r.width), h: Math.round(r.height), hit,
            at: at ? (at.tagName.toLowerCase() + (at.id ? '#' + at.id : '')) : null,
            scrollY: Math.round(window.scrollY) };
@@ -1197,9 +1510,12 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       const e = params.entry || {};
       pushBuf(s.console, { kind: 'log', ts, level: e.level, text: e.text, url: e.url });
     } else if (method === 'Network.requestWillBeSent') {
+      const req = params.request || {};
       s.netIds.set(params.requestId, {
-        id: params.requestId, ts, method: params.request.method, url: params.request.url,
-        type: (params.type || '').toLowerCase(), status: null, ok: null, error: null, size: null
+        id: params.requestId, ts, method: req.method, url: req.url,
+        type: (params.type || '').toLowerCase(), status: null, ok: null, error: null, size: null,
+        reqHeaders: req.headers || null, postData: req.postData || null,
+        hasPostData: req.hasPostData === true, mime: null
       });
     } else if (method === 'Network.responseReceived') {
       const r = s.netIds.get(params.requestId);
@@ -1315,9 +1631,21 @@ function _fSnapshot() {
     if (st.visibility === 'hidden' || st.display === 'none' || st.opacity === '0') return false;
     return r.width > 0 && r.height > 0;
   };
-  document.querySelectorAll('[data-xb-ref]').forEach((el) => el.removeAttribute('data-xb-ref'));
-  const els = Array.from(document.querySelectorAll(SEL)).filter(vis).slice(0, 400);
-  const items = els.map((el, i) => {
+  // 深度遍历：企业 SPA（Fluent/FAST 之类）把表单放在 shadow root 里，
+  // 只用 document.querySelectorAll 会连整个表单都看不见（实测 Partner Center）
+  const roots = [];
+  const collect = (r) => { roots.push(r); r.querySelectorAll('*').forEach((e) => { if (e.shadowRoot) collect(e.shadowRoot); }); };
+  collect(document);
+  roots.forEach((r) => {
+    if (!r.querySelectorAll) return;
+    r.querySelectorAll('[data-xb-ref]').forEach((el) => el.removeAttribute('data-xb-ref'));
+  });
+  const els = [];
+  for (const r of roots) {
+    if (!r.querySelectorAll) continue;
+    for (const el of r.querySelectorAll(SEL)) if (vis(el)) els.push(el);
+  }
+  const items = els.slice(0, 400).map((el, i) => {
     el.setAttribute('data-xb-ref', String(i));
     const name = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || el.getAttribute('name') || '')
       .replace(/\s+/g, ' ').trim().slice(0, 120);
@@ -1339,12 +1667,14 @@ function _fSnapshot() {
       href: el.href || undefined,
       value: el.value !== undefined && el.value !== '' ? String(el.value).slice(0, 80) : undefined,
       checked: el.checked === true ? true : undefined,
-      disabled: el.disabled || undefined
+      disabled: el.disabled || undefined,
+      inShadow: el.getRootNode() && el.getRootNode().host ? true : undefined
     };
   });
   return {
     url: location.href,
     title: document.title,
+    shadowRoots: roots.length - 1,
     text: (document.body ? document.body.innerText : '').replace(/\n{3,}/g, '\n\n').slice(0, 8000),
     headings: Array.from(document.querySelectorAll('h1,h2,h3')).slice(0, 40)
       .map((h) => `${h.tagName.toLowerCase()}: ${(h.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 100)}`),
@@ -1420,7 +1750,8 @@ const COMMANDS = {
       const fid = r.frameId === undefined ? 0 : r.frameId;
       if (r.error || !r.result) continue;
       const d = r.result;
-      frames.push({ frameId: fid, url: d.url, title: d.title, items: d.items.length });
+      frames.push({ frameId: fid, url: d.url, title: d.title,
+                    items: d.items.length, shadowRoots: d.shadowRoots || 0 });
       for (const it of d.items) {
         it.ref = fid === 0 ? `@e${it.i}` : `@e${it.i}f${fid}`;
         items.push({ ...it, frameId: fid });
@@ -1432,6 +1763,7 @@ const COMMANDS = {
       tabId: tab.id,
       url: main.url || tab.url,
       title: main.title || tab.title,
+      shadowRoots: main.shadowRoots || 0,
       text: main.text || '',
       headings: main.headings || [],
       frames,
@@ -1871,6 +2203,130 @@ const COMMANDS = {
     return { tabId: tab.id, count: messages.length, messages };
   },
 
+  async locate(a) {
+    const tab = await getTab(a.tabId, a);
+    if (!a.text && !a.label) throw fail('invalid_params', 'text or label required');
+    const hit = await safeInject(tab.id, _fLocate, [{ text: a.text, label: a.label,
+      tag: a.tag, exact: a.exact === true, selector: a.selector }], a.frameId);
+    if (!hit || !hit.found) {
+      throw fail('target_not_found', `no element matching ${a.text ? 'text=' + JSON.stringify(a.text) : 'label=' + JSON.stringify(a.label)}`);
+    }
+    return { tabId: tab.id, ...hit };
+  },
+
+
+  async 'network.har'(a) {
+    const tab = await getTab(a.tabId, a);
+    const s = await attachDebugger(tab.id);
+    touchDbg(tab.id);
+    let items = s.network.slice();
+    if (a.sinceMs) items = items.filter((r) => r.ts >= Number(a.sinceMs));
+    if (a.filter) {
+      const re = new RegExp(String(a.filter), 'i');
+      items = items.filter((r) => re.test(r.url));
+    }
+    const entries = items.map((r) => {
+      const headers = r.reqHeaders || {};
+      return {
+        startedDateTime: new Date(r.ts || Date.now()).toISOString(),
+        time: 0,
+        request: {
+          method: r.method, url: r.url, httpVersion: 'HTTP/1.1',
+          headers: Object.entries(headers).map(([name, value]) => ({ name, value: String(value) })),
+          queryString: [], cookies: [], headersSize: -1,
+          bodySize: r.postData ? r.postData.length : 0,
+          postData: r.postData
+            ? { mimeType: headers['content-type'] || headers['Content-Type'] || 'application/json', text: r.postData }
+            : undefined
+        },
+        response: {
+          status: r.status || 0,
+          statusText: r.error ? r.error : (r.ok === false ? 'failed' : ''),
+          httpVersion: 'HTTP/1.1', headers: [], cookies: [],
+          content: { size: r.size || 0, mimeType: r.mime || '' },
+          redirectURL: '', headersSize: -1, bodySize: r.size || 0
+        },
+        cache: {}, timings: { send: 0, wait: 0, receive: 0 },
+        _resourceType: r.type || 'other', _fromCache: r.fromCache === true
+      };
+    });
+    return {
+      log: {
+        version: '1.2',
+        creator: { name: 'xb', version: chrome.runtime.getManifest().version },
+        pages: [], entries
+      }
+    };
+  },
+
+  /* Arm capture BEFORE the action that triggers the request, otherwise the
+   * request is simply not in the buffer (Network.enable only starts recording
+   * from the moment it is called). */
+  async 'network.arm'(a) {
+    const tab = await getTab(a.tabId, a);
+    const s = await attachDebugger(tab.id);
+    touchDbg(tab.id);
+    await withDebugger(tab.id, async (t) => {
+      await chrome.debugger.sendCommand(t, 'Network.enable', { maxTotalBufferSize: 20000000, maxResourceBufferSize: 5000000 });
+    }, true);
+    return { tabId: tab.id, sinceMs: Date.now(), buffered: s.network.length };
+  },
+
+  async 'network.wait'(a) {
+    const tab = await getTab(a.tabId, a);
+    const s = await attachDebugger(tab.id);
+    touchDbg(tab.id);
+    await withDebugger(tab.id, async (t) => {
+      await chrome.debugger.sendCommand(t, 'Network.enable', { maxTotalBufferSize: 20000000, maxResourceBufferSize: 5000000 });
+    }, true).catch(() => {});
+    const since = Number(a.sinceMs || (Date.now() - 3000));
+    const re = a.urlPattern ? new RegExp(String(a.urlPattern), 'i') : null;
+    const method = a.method ? String(a.method).toUpperCase() : null;
+    const timeout = Number(a.timeoutMs || 15000);
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      const idx = s.network.findIndex((r) => r.ts >= since
+        && (!re || re.test(r.url))
+        && (!method || String(r.method).toUpperCase() === method)
+        && (a.status === undefined || a.status === null || r.status === Number(a.status)));
+      if (idx >= 0) {
+        return { tabId: tab.id, matched: true, waitedMs: Date.now() - started,
+                 index: idx, entry: s.network[idx] };
+      }
+      await sleep(150);
+    }
+    return { tabId: tab.id, matched: false, waitedMs: timeout, buffered: s.network.length };
+  },
+
+  async 'network.body'(a) {
+    const tab = await getTab(a.tabId, a);
+    const s = await attachDebugger(tab.id);
+    const idx = Number(a.index);
+    const rec = s.network[idx];
+    if (!rec) throw fail('target_not_found', `no network entry at index ${idx} (${s.network.length} buffered)`);
+    const maxChars = Number(a.maxChars || 200000);
+    return await withDebugger(tab.id, async (t) => {
+      const r = await chrome.debugger.sendCommand(t, 'Network.getResponseBody', { requestId: rec.id });
+      const body = String(r.body || '');
+      return { tabId: tab.id, index: idx, url: rec.url, status: rec.status,
+               base64: r.base64Encoded === true, bytes: body.length,
+               body: body.slice(0, maxChars) };
+    });
+  },
+
+  async 'network.replay'(a) {
+    const tab = await getTab(a.tabId, a);
+    const s = await attachDebugger(tab.id);
+    const idx = Number(a.index);
+    const rec = s.network[idx];
+    if (!rec) throw fail('target_not_found', `no network entry at index ${idx} (${s.network.length} buffered)`);
+    const spec = { method: rec.method, url: a.url || rec.url, headers: rec.reqHeaders || {},
+                   body: a.body !== undefined && a.body !== null ? a.body : rec.postData };
+    const out = await safeInject(tab.id, _fReplay, [spec], a.frameId, 30000);
+    if (!out || out.error) throw fail('unavailable', (out && out.error) || 'replay failed');
+    return { tabId: tab.id, replayedIndex: idx, ...out };
+  },
+
   async 'network.read'(a) {
     const tab = await getTab(a.tabId);
     const s = await attachDebugger(tab.id);
@@ -2107,6 +2563,38 @@ const COMMANDS = {
 
   /* ---- panel: what the popup shows ---- */
 
+  /* ---- pause switch + blocked sites (enforced in the dispatcher above) ---- */
+  async pause() {
+    PAUSED = true;
+    try { await chrome.storage.local.set({ [PAUSE_KEY]: true }); } catch (e) {}
+    return { paused: true };
+  },
+
+  async resume() {
+    PAUSED = false;
+    try { await chrome.storage.local.set({ [PAUSE_KEY]: false }); } catch (e) {}
+    return { paused: false };
+  },
+
+  async paused() { return { paused: PAUSED, blocked: BLOCKED.length }; },
+
+  async 'block.list'() { return { blocked: BLOCKED.slice() }; },
+
+  async 'block.add'(a) {
+    const raw = String(a.pattern || a.host || '').trim().toLowerCase();
+    if (!raw) throw fail('invalid_params', 'pattern required (host or *.domain)');
+    if (!BLOCKED.includes(raw)) BLOCKED = [...BLOCKED, raw];
+    try { await chrome.storage.local.set({ [BLOCK_KEY]: BLOCKED }); } catch (e) {}
+    return { blocked: BLOCKED.slice(), added: raw };
+  },
+
+  async 'block.remove'(a) {
+    const raw = String(a.pattern || a.host || '').trim().toLowerCase();
+    BLOCKED = BLOCKED.filter((p) => p !== raw);
+    try { await chrome.storage.local.set({ [BLOCK_KEY]: BLOCKED }); } catch (e) {}
+    return { blocked: BLOCKED.slice(), removed: raw };
+  },
+
   async 'panel.state'() { return await panelState(); },
 
   /* name this browser so --browser <label> works without remembering the id */
@@ -2251,14 +2739,34 @@ const COMMANDS = {
     if (a.index !== undefined) props.index = Number(a.index);
     const tab = await chrome.tabs.create(props);
     let groupId = null;
+    let reused = false;
     if (a.group) {
-      groupId = await chrome.tabs.group({ tabIds: [tab.id], createProperties: a.windowId !== undefined ? { windowId: Number(a.windowId) } : undefined });
-      const upd = { title: brandTitle(a.group.title) };   // 新建组一律带上 XB[...] 前缀
-      if (a.group.color) upd.color = a.group.color;
-      await chrome.tabGroups.update(groupId, upd);
-      if (a.group.collapsed !== undefined) await chrome.tabGroups.update(groupId, { collapsed: !!a.group.collapsed });
+      const title = brandTitle(a.group.title);
+      const winId = a.windowId !== undefined ? Number(a.windowId) : tab.windowId;
+      let existing = null;
+      if (a.group.reuse !== false) {
+        // 同一个任务连开多个标签时应该并进同一个组，而不是每次新建一个同名组
+        const groups = await chrome.tabGroups.query({ windowId: winId });
+        existing = groups.find((g) => g.title === title) || null;
+      }
+      if (existing) {
+        groupId = await chrome.tabs.group({ groupId: existing.id, tabIds: [tab.id] });
+        reused = true;
+        if (a.group.color && a.group.color !== existing.color) {
+          await chrome.tabGroups.update(groupId, { color: a.group.color });
+        }
+        if (a.group.collapsed === false && existing.collapsed) {
+          await chrome.tabGroups.update(groupId, { collapsed: false });
+        }
+      } else {
+        groupId = await chrome.tabs.group({ tabIds: [tab.id], createProperties: a.windowId !== undefined ? { windowId: Number(a.windowId) } : undefined });
+        const upd = { title };                      // 新建组一律带上 XB[...] 前缀
+        if (a.group.color) upd.color = a.group.color;
+        await chrome.tabGroups.update(groupId, upd);
+        if (a.group.collapsed !== undefined) await chrome.tabGroups.update(groupId, { collapsed: !!a.group.collapsed });
+      }
     }
-    return { ...shapeTab(await chrome.tabs.get(tab.id)), groupIdOfCreated: groupId };
+    return { ...shapeTab(await chrome.tabs.get(tab.id)), groupIdOfCreated: groupId, groupReused: reused };
   },
 
   async 'tab.close'(a) {
@@ -2596,6 +3104,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             await clearMark(id);
           }
           reply({ ok: true, result: await panelState() });
+          break;
+        case 'pause-toggle':
+          PAUSED = !PAUSED;
+          try { await chrome.storage.local.set({ [PAUSE_KEY]: PAUSED }); } catch (e) {}
+          reply({ ok: true, result: { paused: PAUSED } });
           break;
         case 'reconnect':
           backoff = RECONNECT_MIN;

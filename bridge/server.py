@@ -37,6 +37,8 @@ STATUS_BY_CODE = {
     "no_target_tab": 404,
     "browser_not_found": 404,
     "restricted_page": 409,
+    "site_blocked": 409,
+    "paused": 409,
     "stale_generation": 409,
     "tab_not_owned": 409,
     "claim_required": 409,

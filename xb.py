@@ -37,7 +37,8 @@ EXIT_BY_CODE = {
     "window_minimized": 3, "browser_not_found": 3,
     "browser_required": 2, "browser_ambiguous": 2,
     "timeout": 4,
-    "target_not_found": 5, "restricted_page": 5,
+    "target_not_found": 5, "restricted_page": 5, "site_blocked": 5,
+    "paused": 3,
     "stale_generation": 6, "tab_not_owned": 6, "claim_required": 6, "batch_failed": 6,
     "debugger_conflict": 7,
 }
@@ -309,6 +310,48 @@ def show_snapshot(snap) -> None:
             print(f"  {it['ref']:<9} {it['role']:<10} {it['name']}{val}{extra}")
 
 
+def do_extract(args) -> dict:
+    """Extract tables, optionally walking a "next page" control and merging pages."""
+    tab = getattr(args, "tab", None)
+    max_pages = max(1, int(getattr(args, "max_pages", 1) or 1))
+    page_wait = max(0, int(getattr(args, "page_wait", 800) or 0)) / 1000.0
+    pages: list[dict] = []
+    signatures: list[list] = []
+    for page in range(max_pages):
+        res = rpc("extract", {"tabId": tab})
+        tables = res.get("tables") or []
+        sig = [((tb.get("headers") or [])[:3], (tb.get("rows") or [])[:1]) for tb in tables]
+        if sig in signatures:                      # the "next" click did not advance
+            break
+        signatures.append(sig)
+        pages.append(res)
+        if not getattr(args, "next", None) or page + 1 >= max_pages:
+            break
+        try:
+            rpc("click", {"tabId": tab, "selector": args.next,
+                          "ref": args.next if str(args.next).startswith("@") else None})
+        except XbFailure as exc:
+            print(f"(stopped after {page + 1} page(s): next control not clickable — {exc})",
+                  file=sys.stderr)
+            break
+        time.sleep(page_wait)
+
+    if len(pages) == 1:
+        return {**pages[0], "pages": 1}
+
+    merged: list[dict] = []
+    for res in pages:
+        for tb in res.get("tables") or []:
+            key = tuple(tb.get("headers") or [])
+            slot = next((m for m in merged if tuple(m.get("headers") or []) == key), None)
+            if slot is None:
+                slot = {"headers": list(key), "rows": []}
+                merged.append(slot)
+            slot["rows"].extend(tb.get("rows") or [])
+    return {"pages": len(pages), "tables": merged,
+            "url": pages[-1].get("url"), "merged": True}
+
+
 def do_download(args) -> None:
     """Trigger the download, let the browser save it, then move it into --dir."""
     d = os.path.abspath(args.dir)
@@ -367,6 +410,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     tgt = argparse.ArgumentParser(add_help=False)
     tgt.add_argument("target", nargs="?", help="ref (@e12) or css selector")
+    tgt.add_argument("--text", help="locate by visible text instead of a selector")
+    tgt.add_argument("--label", help="locate by aria-label / placeholder / name")
+    tgt.add_argument("--exact", action="store_true", help="require an exact text/label match")
     tgt.add_argument("--tab", type=int)
     tgt.add_argument("--no-mark", action="store_true", dest="no_mark",
                      help="don't paint the control marker on this tab")
@@ -374,6 +420,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # infra
     sub.add_parser("status")
+    sub.add_parser("pause", help="stop the agent from touching any tab (toolbar panel also has this)")
+    sub.add_parser("resume", help="undo xb pause")
+    sub.add_parser("blocked", help="list host patterns the agent must never touch")
+    bl = sub.add_parser("block", help="never touch this site again"); bl.add_argument("pattern")
+    ub = sub.add_parser("unblock", help="remove a blocked pattern"); ub.add_argument("pattern")
     sub.add_parser("browsers", help="list connected browsers and which one is the default")
     use = sub.add_parser("use", help="make a browser the default for this repo")
     use.add_argument("target", help="instance id or label")
@@ -390,6 +441,8 @@ def build_parser() -> argparse.ArgumentParser:
     o = sub.add_parser("open", help="open a tab (optionally into a new group)")
     o.add_argument("url"); o.add_argument("--background", action="store_true")
     o.add_argument("--group-title"); o.add_argument("--color", choices=COLORS)
+    o.add_argument("--new-group", action="store_true",
+                   help="force a fresh group even if one with the same XB[...] title exists")
     c = sub.add_parser("close"); c.add_argument("tab_ids")
     s = sub.add_parser("tab-select", help="activate a tab")
     s.add_argument("tab_id", type=int); s.add_argument("--no-focus", action="store_true")
@@ -432,8 +485,14 @@ def build_parser() -> argparse.ArgumentParser:
     ob = sub.add_parser("observe"); ob.add_argument("--tab", type=int)
     tx = sub.add_parser("text"); tx.add_argument("--tab", type=int); tx.add_argument("--selector")
     gh = sub.add_parser("get-html", parents=[tgt])
+    lo = sub.add_parser("locate", help="find an element by text/aria-label and print its selector")
+    lo.add_argument("--text"); lo.add_argument("--label"); lo.add_argument("--exact", action="store_true")
+    lo.add_argument("--tab", type=int)
     ex = sub.add_parser("extract"); ex.add_argument("--tab", type=int); ex.add_argument("--out")
     ex.add_argument("--csv", action="store_true")
+    ex.add_argument("--next", help="selector/ref of the 'next page' control; loops it")
+    ex.add_argument("--max-pages", type=int, default=1)
+    ex.add_argument("--page-wait", type=int, default=800, help="ms to wait after clicking next")
     ev = sub.add_parser("eval", help="evaluate JS (CDP)"); ev.add_argument("code"); ev.add_argument("--tab", type=int)
 
     # interaction
@@ -492,6 +551,15 @@ def build_parser() -> argparse.ArgumentParser:
     nw = sub.add_parser("network"); nw.add_argument("--tab", type=int); nw.add_argument("--filter")
     nw.add_argument("--limit", type=int); nw.add_argument("--failed-only", action="store_true")
     nw.add_argument("--clear", action="store_true")
+    nw.add_argument("--har", help="write a HAR 1.2 file")
+    nw.add_argument("--wait-pattern", help="wait for a request whose URL matches this regex")
+    nw.add_argument("--click", help="with --wait-pattern: arm capture, click this selector, then wait")
+    nw.add_argument("--method", help="with --wait-pattern: only this HTTP method")
+    nw.add_argument("--timeout", type=float, default=15.0, help="seconds to wait")
+    nw.add_argument("--since", type=int, help="epoch ms lower bound")
+    nw.add_argument("--body", type=int, help="print the response body of entry N")
+    nw.add_argument("--replay", type=int, help="re-issue request N with the page's own session")
+    nw.add_argument("--replay-body", help="override the request body when replaying")
 
     # capture
     for nm in ("screenshot", "shot"):
@@ -548,6 +616,18 @@ def main(argv=None) -> int:
     BROWSER = target_browser(getattr(args, "browser", None))
     tab = getattr(args, "tab", None)
 
+    # --text / --label: resolve to a real selector first, then every element command
+    # behaves exactly as if it had been given that selector.
+    wants_locate = bool(getattr(args, "text", None) or getattr(args, "label", None))
+    if wants_locate and not (getattr(args, "target", "") or "").startswith("@"):
+        loc = rpc("locate", {"tabId": tab, "text": getattr(args, "text", None),
+                             "label": getattr(args, "label", None),
+                             "exact": True if getattr(args, "exact", False) else None})
+        args.target = loc["selector"]
+        if not JSON_MODE:
+            print(f"(located {loc.get('name')!r} -> {loc['selector']}, {loc.get('candidates')} candidate(s))",
+                  file=sys.stderr)
+
     if args.cmd in ("browsers", "use", "label"):
         rows = list_browsers()
         default = load_default_browser()
@@ -589,6 +669,23 @@ def main(argv=None) -> int:
             save_default_browser(r["instanceId"])
         emit(r, j, lambda rr: print(f"browser {rr['instanceId']} labelled "
                                     + (f"'{rr['label']}'" if rr["label"] else "(cleared)")))
+        return 0
+
+    if args.cmd in ("pause", "resume", "blocked", "block", "unblock"):
+        if args.cmd in ("pause", "resume"):
+            r = rpc(args.cmd, {})
+            emit(r, j, lambda rr: print("agent paused — every tab command will refuse until `xb resume`"
+                                        if rr.get("paused") else "agent resumed"))
+        else:
+            if args.cmd == "blocked":
+                r = rpc("block.list", {})
+                emit(r, j, lambda rr: print(chr(10).join(rr.get("blocked") or []) or "(nothing blocked)"))
+            elif args.cmd == "block":
+                r = rpc("block.add", {"pattern": args.pattern})
+                emit(r, j, lambda rr: print(f"blocked {rr['added']}  ({len(rr['blocked'])} pattern(s))"))
+            else:
+                r = rpc("block.remove", {"pattern": args.pattern})
+                emit(r, j, lambda rr: print(f"unblocked {rr['removed']}  ({len(rr['blocked'])} left)"))
         return 0
 
     if args.cmd == "status":
@@ -679,10 +776,13 @@ def main(argv=None) -> int:
              lambda r: print(f"window {r['id']} -> {r.get('width')}x{r.get('height')} ({r.get('state')})"))
     elif args.cmd == "open":
         ai = {"url": args.url, "active": not args.background}
-        if args.group_title or args.color:
+        if args.group_title or args.color or args.new_group:
             ai["group"] = {k: v for k, v in (("title", args.group_title), ("color", args.color)) if v}
+            if args.new_group:
+                ai["group"]["reuse"] = False
         emit(rpc("tab.create", ai), j, lambda t: print(
-            f"opened tab {t['id']} (group {t.get('groupIdOfCreated') or '-'})  {t.get('title', '')}"))
+            f"opened tab {t['id']} (group {t.get('groupIdOfCreated') or '-'}"
+            f"{', joined existing' if t.get('groupReused') else ''})  {t.get('title', '')}"))
     elif args.cmd == "close":
         emit(rpc("tab.close", {"tabIds": ids(args.tab_ids)}), j,
              lambda r: print("closed:", ", ".join(map(str, r["closed"]))))
@@ -765,7 +865,8 @@ def main(argv=None) -> int:
         else:
             print(r["html"])
     elif args.cmd == "extract":
-        r = rpc("extract", {"tabId": tab})
+        extracted = do_extract(args)
+        r = extracted
         if args.out:
             if args.csv:
                 with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
@@ -777,9 +878,15 @@ def main(argv=None) -> int:
             else:
                 with open(args.out, "w", encoding="utf-8") as f:
                     json.dump(r, f, ensure_ascii=False, indent=2)
-            print(f"written {args.out}")
+            print(f"written {args.out}  ({r.get('pages', 1)} page(s), "
+                  f"{sum(len(t.get('rows') or []) for t in r.get('tables') or [])} row(s))")
         else:
             print(json.dumps(r, ensure_ascii=False, indent=2))
+    elif args.cmd == "locate":
+        emit(rpc("locate", {"tabId": tab, "text": args.text, "label": args.label,
+                            "exact": True if args.exact else None}), j,
+             lambda rr: print(f"{rr.get('name')!r} -> {rr['selector']}  "
+                              f"({rr.get('candidates')} candidate(s), <{rr.get('tag')}>)"))
     elif args.cmd == "eval":
         emit(rpc("evaluate", {"tabId": tab, "code": args.code}, timeout=120), j,
              lambda r: print(json.dumps(r.get("value"), ensure_ascii=False, indent=2)))
@@ -893,6 +1000,51 @@ def main(argv=None) -> int:
                 print(f"[{m.get('level') or m.get('kind')}] {m.get('text')}")
             print(f"({r['count']} message(s))")
     elif args.cmd == "network":
+        if args.har:
+            har = rpc("network.har", {"tabId": tab, "filter": args.filter, "sinceMs": args.since},
+                      timeout=120)
+            with open(args.har, "w", encoding="utf-8") as f:
+                json.dump(har, f, ensure_ascii=False, indent=2)
+            entries = (har.get("log") or {}).get("entries") or []
+            print(f"{len(entries)} entries -> {args.har}")
+            return 0
+        if args.wait_pattern:
+            since = args.since
+            if args.click:
+                armed = rpc("network.arm", {"tabId": tab}, timeout=30)
+                since = armed["sinceMs"]
+                rpc("click", {"tabId": tab,
+                              "ref": args.click if str(args.click).startswith("@") else None,
+                              "selector": None if str(args.click).startswith("@") else args.click})
+            elif since is None:
+                armed = rpc("network.arm", {"tabId": tab}, timeout=30)
+                since = armed["sinceMs"]
+            r = rpc("network.wait", {"tabId": tab, "urlPattern": args.wait_pattern,
+                                     "method": args.method, "sinceMs": since,
+                                     "timeoutMs": int(args.timeout * 1000)},
+                    timeout=args.timeout + 15)
+            emit(r, j, lambda rr: print(
+                f"{'matched' if rr.get('matched') else 'TIMEOUT'} after {rr.get('waitedMs')}ms: "
+                + (f"[{rr['index']}] {rr['entry']['method']} {rr['entry']['status']} {rr['entry']['url'][:110]}"
+                   if rr.get("matched") else f"{rr.get('buffered')} buffered")))
+            if not r.get("matched"):
+                raise XbFailure("timeout", f"no request matched {args.wait_pattern!r} within {args.timeout:g}s",
+                                retryable=True, cmd="network")
+            return 0
+        if args.body is not None:
+            r = rpc("network.body", {"tabId": tab, "index": args.body}, timeout=60)
+            if j:
+                print(json.dumps(r, ensure_ascii=False, indent=2))
+            else:
+                print(r.get("body") or "")
+            return 0
+        if args.replay is not None:
+            r = rpc("network.replay", {"tabId": tab, "index": args.replay,
+                                       "body": args.replay_body}, timeout=120)
+            emit(r, j, lambda rr: print(
+                f"replay [{args.replay}] {rr['method']} {rr['status']} {rr['bytes']}B" + chr(10)
+                + (rr.get("text") or "")[:4000]))
+            return 0
         r = rpc("network.read", {"tabId": tab, "filter": args.filter, "limit": args.limit,
                                  "failedOnly": args.failed_only, "clear": args.clear})
         if j:

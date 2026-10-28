@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>shadow DOM 测试台</title>
+<style>
+  body { font: 15px/1.6 system-ui, sans-serif; margin: 24px 32px; color: #10202a; }
+  h1 { font-size: 20px; }
+  section { border: 1px solid #d8e0ea; border-radius: 10px; padding: 14px 18px; margin: 14px 0; background: #fff; }
+  code { background: #f2f5f9; padding: 1px 5px; border-radius: 4px; }
+  #s-out { font-weight: 600; color: #0b7c6d; }
+</style>
+</head>
+<body>
+<h1>shadow DOM 测试台</h1>
+<p>页面上的控件都在 <code>#shadow-host</code> 的 shadow root 里（还有一层嵌套）。
+   普通 <code>document.querySelector</code> 找不到它们——这正是企业 SPA（Fluent/FAST 一类）的形态。</p>
+
+<section>
+  <h2>1. 影子表单</h2>
+  <div id="shadow-host"></div>
+  <p>结果：<span id="s-out">（未操作）</span></p>
+</section>
+
+<section>
+  <h2>2. 嵌套影子层</h2>
+  <div id="shadow-nested"></div>
+  <p>结果：<span id="n-out">（未操作）</span></p>
+</section>
+
+<script>
+  (function () {
+    const host = document.getElementById('shadow-host');
+    const root = host.attachShadow({ mode: 'open' });
+    root.innerHTML = `
+      <style>
+        .row { margin: 8px 0; }
+        button { font: inherit; padding: 6px 12px; border-radius: 8px; border: 1px solid #0b7c6d;
+                 background: #0fa08c; color: #fff; cursor: pointer; }
+        input, select, textarea { font: inherit; padding: 6px 10px; border: 1px solid #cfd8e5; border-radius: 8px; }
+      </style>
+      <div class="row"><button id="s-btn">影子按钮</button></div>
+      <div class="row"><input id="s-input" placeholder="影子输入框"></div>
+      <div class="row"><select id="s-select">
+        <option value="jia">甲</option><option value="yi">乙</option><option value="bing">丙</option>
+      </select></div>
+      <div class="row"><textarea id="s-area" rows="2" cols="28"></textarea></div>
+      <div class="row"><input type="checkbox" id="s-check"> 影子复选框</div>
+    `;
+    root.getElementById('s-btn').addEventListener('click', () => {
+      document.getElementById('s-out').textContent = '影子按钮被点击';
+      window.__shadowClicked = (window.__shadowClicked || 0) + 1;
+    });
+
+    const nh = document.getElementById('shadow-nested');
+    const outer = nh.attachShadow({ mode: 'open' });
+    const inner = document.createElement('div');
+    outer.appendChild(inner);
+    const innerRoot = inner.attachShadow({ mode: 'open' });
+    innerRoot.innerHTML = '<button id="deep-btn">两层嵌套按钮</button>';
+    innerRoot.getElementById('deep-btn').addEventListener('click', () => {
+      document.getElementById('n-out').textContent = '嵌套按钮被点击';
+    });
+  })();
+</script>
+</body>
+</html>
