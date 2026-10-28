@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  contract:
+    name: contract (browser-free)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install deps
+        run: pip install websockets
+      - name: bridge contract + native host framing
+        run: python test/offline.py
+      - name: python syntax
+        run: python -m compileall -q xb.py bridge tools test
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: extension syntax
+        run: |
+          node --check extension/sw.js
+          node --check extension/popup.js
+      - name: validate + package the store build
+        run: python tools/build_store.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XBBridge-store-zip
+          path: dist/XBBridge-*.zip
+
+  exe:
+    name: xb.exe (windows)
+    runs-on: windows-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install deps
+        run: pip install websockets pyinstaller
+      - name: build
+        run: python tools/build_exe.py --clean
+      - name: smoke test
+        shell: pwsh
+        run: |
+          .\dist\xb.exe status
+          if ($LASTEXITCODE -ne 0) { throw "xb.exe status failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xb-exe
+          path: dist/xb.exe

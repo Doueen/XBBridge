@@ -101,11 +101,15 @@ XB[禅道 133620]     XB[抓数据]     XB[任务]
 # 读
 xb navigate URL [--tab N]        xb snapshot [--tab N]           xb observe
 xb text [--selector CSS]         xb get-html [REF|CSS]           xb extract [--out f.json --csv]
+xb locate --text "提交" --label 保存          # 按可见文字 / aria-label 找元素，输出可直接用的选择器
+xb extract --next "#next" --max-pages 5      # 翻页抓取：点下一页、按表头合并、死链自动停
+xb snapshot | xb snapshot --shadow            # 深度遍历 shadow root（企业 SPA 表单大多在里面）
 xb screenshot out.png [--full] [--clip 0,0,800,600] [--selector "#tbl"] [--format jpeg --quality 70]
 xb screenshot out.png --scale-to 1200 --foreground   # 默认不抢前台；--foreground 才允许
 
 # 交互（REF 形如 @e12，也可以用 CSS 选择器）
 xb click @e12 | xb click "#submit" | xb click "#pad" --trusted --double
+xb click --text "下一步"      xb fill --label 邮箱 "a@b.c"    # 不用先 snapshot 找 ref，所有元素命令都认 --text/--label
 xb drag "#knob" "300,300" [--steps 12 --duration 320]      # from/to 都收 @eN | CSS | "x,y"
 xb fill @e5 "文本"              xb press Enter [--ref @e5]      xb select @e6 --values cherry
 xb press "Tab,Enter"                                        # 逗号序列，逐步派发
@@ -154,8 +158,21 @@ xb group new --tabs 1,2,3 --title "PR 评审" --color blue
 xb group list / xb group set 7 --color green --title 改好了 --collapse
 xb group add 7 8 / xb group rm 8 / xb group close 7 / xb group move 7 --index 0
 
+# 网络（先布控再点，避免抓不到）
+xb network --wait-pattern "api/list" --click "#search" --timeout 10   # 布控 → 点击 → 等这条请求
+xb network --body 3                 # 第 3 条的响应体（不用再去解析页面）
+xb network --replay 3 --replay-body '{"page":2}'                      # 用页面自己的会话重放
+xb network --har out.har            # 导出 HAR 1.2，丢给前端/后端一起看
+
+# 安全开关（面板上也有按钮）
+xb pause / xb resume                # 暂停后所有标签命令一律拒绝（只读命令除外）
+xb block "mail.google.com" / xb unblock ... / xb blocked              # 永不碰的站点，写死在派发层
+
 # 会话 / 诊断
 xb recent / xb restore [sessionId] / xb doctor / xb apis / xb logs -n 50
+xb diag --tab 12                    # 一键打包：版本、面板状态、标签、日志、网络 → 一个 zip
+xb host install / xb host status / xb host-wake                       # 原生消息宿主（可选）
+xb native-host                      # 宿主本体，Edge 启动时由它拉起桥
 ```
 
 所有命令加 `--json`（放在子命令前）输出机器可读结果；失败时 stdout 是 `{"ok":false,"error":{...}}`。
@@ -254,7 +271,7 @@ python test/e2e.py                                            # 终端 C
 powershell -File test/kill-edge.ps1 -Match xb-try             # 清理
 ```
 
-最近一次：**78/78 ALL GREEN**，覆盖等待/竞态、@eN 快照与引用点击、console/network 缓冲、
+最近一次：**全绿**（见 `test/e2e.py` 末尾计数），覆盖等待/竞态、@eN 快照与引用点击、console/network 缓冲、
 回车提交导航、select/hover/wheel/scroll-to、上传/下载落盘、extract 表格、emulate 手机视口、
 截图几何（视口/全页/裁剪/元素/后台不抢焦点）、标签组全套、split/unsplit、sleep、recent、
 错误契约（5/6 退出码与 outcome）、标记生命周期与自动标记、拖拽、可信点击、批量与部分失败语义、
@@ -280,7 +297,26 @@ python tools/make_store_shots.py --page test/store-page.png   # → docs/store/*
 
 提交材料（可直接复制进 Partner Center）：`docs/STORE-LISTING.md`（属性、用途声明、逐条权限理由、远程代码声明、商店文案、审核测试说明）、`docs/PRIVACY.md`（隐私政策，托管后把 URL 填进去）。
 
-当前包的权限是裁剪过的 9 项：`tabs tabGroups windows scripting debugger alarms storage sessions downloads`
+当前包的权限是**裁剪过的 10 项**：`tabs tabGroups windows scripting debugger alarms storage sessions downloads nativeMessaging`
+（`nativeMessaging` 只服务于可选的本地宿主；不装宿主也能用，装了的用户浏览器一启动桥就在跑。）
+
+### 免依赖使用（机器上没有 Python）
+
+```bash
+python tools/build_exe.py            # → dist/xb.exe（单文件，内含 bridge/server.py）
+xb host install --extension-id <扩展 id>   # 可选：让 Edge 启动时自动拉起桥
+```
+
+`xb.exe` 自带守护进程，`xb.exe serve` / `xb.exe native-host` 都从它里面跑；状态与日志落在
+`%LOCALAPPDATA%\XBBridge\`。CI（`.github/workflows/ci.yml`）会构建并冒烟测试这个 exe。
+
+### 不依赖浏览器的契约测试
+
+```bash
+python test/offline.py               # 起真守护进程 + 假扩展，16 项：注册表/错误映射/Origin 策略/宿主分帧
+```
+
+这条不碰浏览器，适合放进任何 CI；`test/e2e.py` 才是需要真 Edge 的那套。
 + `host_permissions: <all_urls>`。`history` / `bookmarks` / `contextMenus` / `idle` / `offscreen` /
 `notifications` / `sidePanel` / `webNavigation` 这 8 项代码里零调用，已从 manifest 移除
 （申请了用不到的高危权限是商店最常见的打回原因）。
