@@ -81,6 +81,20 @@ python xb.py status      # 期望：extension: connected  v0.3.2
 守护进程不用手动起，任何 `xb` 命令发现它不在都会自己拉起来（日志 `.xb/server.log`）；
 要前台调试 `python xb.py serve`，要停 `python xb.py stop`。
 
+## 标签组命名
+
+agent 开的所有标签组统一带前缀，一眼能和自己的组区分开：
+
+```
+XB[禅道 133620]     XB[抓数据]     XB[任务]
+```
+
+- `xb open URL --group-title 禅道 133620` → 组名 `XB[禅道 133620]`
+- `xb group new --tabs 1,2`（不给标题）→ `XB[任务]`
+- `xb group set <id> --title 新名` → `XB[新名]`；真要裸名用 `--raw-title`
+- `group.list` 同时返回 `title`（带前缀）与 `baseTitle`（去前缀），脚本比对用后者
+- 已经带 `XB[...]` 的标题不会重复加
+
 ## 命令
 
 ```bash

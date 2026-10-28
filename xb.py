@@ -411,6 +411,8 @@ def build_parser() -> argparse.ArgumentParser:
     gn.add_argument("--color", choices=COLORS); gn.add_argument("--collapse", action="store_true")
     gl = gs.add_parser("list"); gl.add_argument("--window", type=int)
     gu = gs.add_parser("set"); gu.add_argument("group_id", type=int); gu.add_argument("--title")
+    gu.add_argument("--raw-title", action="store_true",
+                    help="rename without the XB[...] prefix the extension normally adds")
     gu.add_argument("--color", choices=COLORS); gu.add_argument("--collapse", action="store_true")
     gu.add_argument("--expand", action="store_true")
     ga = gs.add_parser("add"); ga.add_argument("group_id", type=int); ga.add_argument("tabs")
@@ -711,6 +713,8 @@ def main(argv=None) -> int:
             ai = {"groupId": args.group_id}
             if args.title is not None:
                 ai["title"] = args.title
+                if getattr(args, "raw_title", False):
+                    ai["rawTitle"] = True
             if args.color:
                 ai["color"] = args.color
             if args.collapse:

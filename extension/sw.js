@@ -359,11 +359,31 @@ function shapeTab(t) {
   };
 }
 
+/* ---- group naming: every group the agent opens is branded "XB[<name>]" ----
+ * 一眼就能在标签栏上区分"agent 开的组"和你自己的组；已经带前缀的标题不再重复加。
+ */
+const GROUP_PREFIX = 'XB';
+const GROUP_DEFAULT_NAME = '任务';
+
+function brandTitle(raw) {
+  const name = raw === undefined || raw === null ? '' : String(raw).trim();
+  if (!name) return `${GROUP_PREFIX}[${GROUP_DEFAULT_NAME}]`;
+  if (new RegExp(`^${GROUP_PREFIX}\\[.*\\]$`).test(name)) return name;
+  return `${GROUP_PREFIX}[${name}]`;
+}
+
+function unbrandTitle(title) {
+  const m = new RegExp(`^${GROUP_PREFIX}\\[(.*)\\]$`).exec(String(title || ''));
+  return m ? m[1] : String(title || '');
+}
+
 function shapeGroup(g) {
   return {
     id: g.id,
     windowId: g.windowId,
     title: g.title,
+    baseTitle: unbrandTitle(g.title),
+    prefix: GROUP_PREFIX,
     color: g.color,
     collapsed: g.collapsed,
     shared: g.shared
@@ -2233,12 +2253,9 @@ const COMMANDS = {
     let groupId = null;
     if (a.group) {
       groupId = await chrome.tabs.group({ tabIds: [tab.id], createProperties: a.windowId !== undefined ? { windowId: Number(a.windowId) } : undefined });
-      if (a.group.title || a.group.color) {
-        const upd = {};
-        if (a.group.title) upd.title = a.group.title;
-        if (a.group.color) upd.color = a.group.color;
-        await chrome.tabGroups.update(groupId, upd);
-      }
+      const upd = { title: brandTitle(a.group.title) };   // 新建组一律带上 XB[...] 前缀
+      if (a.group.color) upd.color = a.group.color;
+      await chrome.tabGroups.update(groupId, upd);
       if (a.group.collapsed !== undefined) await chrome.tabGroups.update(groupId, { collapsed: !!a.group.collapsed });
     }
     return { ...shapeTab(await chrome.tabs.get(tab.id)), groupIdOfCreated: groupId };
@@ -2309,8 +2326,7 @@ const COMMANDS = {
     if (a.windowId !== undefined) createProperties.windowId = Number(a.windowId);
     else createProperties.windowId = (await getTab(ids[0])).windowId;
     const groupId = await chrome.tabs.group({ tabIds: ids, createProperties });
-    const upd = {};
-    if (a.title !== undefined) upd.title = String(a.title);
+    const upd = { title: brandTitle(a.title) };           // 命名统一加 XB[...]
     if (a.color) upd.color = a.color;
     if (a.collapsed !== undefined) upd.collapsed = !!a.collapsed;
     const group = Object.keys(upd).length ? await chrome.tabGroups.update(groupId, upd) : await chrome.tabGroups.get(groupId);
@@ -2334,7 +2350,8 @@ const COMMANDS = {
     if (a.groupId === undefined) throw new Error('groupId required');
     if (a.color && !COLORS.includes(a.color)) throw new Error(`color must be one of ${COLORS.join('|')}`);
     const upd = {};
-    if (a.title !== undefined) upd.title = String(a.title);
+    // 改名同样带 XB[...]；真要一个不加前缀的组名，传 rawTitle:true
+    if (a.title !== undefined) upd.title = a.rawTitle === true ? String(a.title) : brandTitle(a.title);
     if (a.color !== undefined) upd.color = a.color;
     if (a.collapsed !== undefined) upd.collapsed = !!a.collapsed;
     if (!Object.keys(upd).length) throw new Error('nothing to update (title|color|collapsed)');

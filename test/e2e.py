@@ -231,12 +231,20 @@ def main() -> int:
     t2 = xb("open", f"{SITE}/beta.html", "--background")["id"]
     t3 = xb("open", f"{SITE}/gamma.html", "--background")["id"]
     grp = xb("group", "new", "--tabs", f"{tab},{t2},{t3}", "--title", "xb e2e", "--color", "blue")
-    check("group.create builds a group", grp["title"] == "xb e2e" and len(grp["tabs"]) == 3,
+    check("group.create brands the title XB[...]",
+          grp["title"] == "XB[xb e2e]" and grp.get("baseTitle") == "xb e2e",
+          f"{grp['title']} / base={grp.get('baseTitle')}")
+    check("group.create builds a group", len(grp["tabs"]) == 3,
           f"group {grp['id']} [{grp['color']}]")
     gid = grp["id"]
     upd = xb("group", "set", gid, "--color", "green", "--title", "改名", "--collapse")
     check("group.update changes title/colour/state",
-          upd["color"] == "green" and upd["title"] == "改名" and upd["collapsed"] is True)
+          upd["color"] == "green" and upd["title"] == "XB[改名]" and upd["collapsed"] is True,
+          str(upd["title"]))
+    raw = xb("group", "set", gid, "--title", "裸名", "--raw-title")
+    check("--raw-title opts out of the prefix", raw["title"] == "裸名", str(raw["title"]))
+    back = xb("group", "set", gid, "--title", "改名")
+    check("re-setting brands again", back["title"] == "XB[改名]", str(back["title"]))
     t4 = xb("open", f"{SITE}/alpha.html", "--background")["id"]
     xb("group", "add", gid, t4)
     n = len([g for g in xb("group", "list") if g["id"] == gid][0]["tabs"])
