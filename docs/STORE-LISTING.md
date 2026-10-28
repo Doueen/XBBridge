@@ -58,7 +58,8 @@
 
 ### Privacy policy URL
 
-托管 `docs/PRIVACY.md` 后填那个 URL（GitHub Pages / Gitee Pages / 公司内站点都行）。
+托管 `docs/PRIVACY.md` 后填那个 URL。当前可直接用：
+`https://github.com/Doueen/XBBridge/blob/main/docs/PRIVACY.md`
 
 ---
 
@@ -126,7 +127,7 @@
 >    "bridge not connected" (`桥没连上`) and explains that a local daemon is required.
 >    No page is read at this point.
 > 2. To see it work: run the companion daemon from
->    `https://<your-repo>#quick-start` (`python xb.py serve`, Python 3.9+), then
+>    `https://github.com/Doueen/XBBridge#快速开始` (`python xb.py serve`, Python 3.9+), then
 >    `python xb.py open https://example.com` — a tab opens in the current window,
 >    inside a group named "xb", with a teal marker and the xb favicon.
 > 3. All permissions listed above are exercised by commands in

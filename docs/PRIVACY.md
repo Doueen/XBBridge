@@ -34,5 +34,5 @@ WebSocket 和你自己启动的 `xb` 命令行工具通信。
 
 ## 联系
 
-- 仓库 / issue：<填写你的仓库地址>
-- 邮箱：<填写你的邮箱>
+- 仓库 / issue：https://github.com/Doueen/XBBridge/issues
+- 邮箱：2140721975@qq.com
