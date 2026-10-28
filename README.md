@@ -20,7 +20,7 @@
 
 ```bash
 # 依赖：Python 3.9+、一条 websockets
-pip install websockets
+pip install -r requirements.txt        # 只有一个包
 
 # 1) 加载扩展：edge://extensions → 开发人员模式 → 加载解压缩的扩展 → 选 本仓库/extension
 #    注意是 extension 这一层，不是仓库根目录（根目录有 __pycache__，Chromium 会拒绝加载）
@@ -31,6 +31,10 @@ python xb.py mark --tab <id> --label "抓数据"
 python xb.py panel                        # 谁在被控、租约还剩多久
 python xb.py close <id>
 ```
+
+**别人要上手需要什么**：Python 3.9+、`pip install -r requirements.txt`、把仓库 clone 下来、
+在 Edge 里加载 `extension/` 这一层。不需要账号、不需要联网、不需要任何云服务；
+没有装 Python 的用户目前用不了——扩展本身只是客户端（见 [常见问题](#常见问题)）。
 
 ![control marker](docs/store/shot-1-marked-tab.png)
 
@@ -299,3 +303,16 @@ MIT，见 [LICENSE](LICENSE)。
 
 CLI 的命令名与参数面参考了 [Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)（MIT），
 实现与扩展代码为本仓库原创。
+
+## 常见问题
+
+**装完扩展什么都不做？** 这是设计：扩展是客户端，必须同机跑 `xb` 守护进程
+（`python xb.py status` 会自动把它拉起来）。没启动时面板只会显示"桥没连上"，不会碰你的浏览。
+
+**能给别人用吗？** 能，但对方需要：Python 3.9+、`pip install -r requirements.txt`、clone 仓库、
+在 `edge://extensions` 里加载 `extension/` 目录。整个过程约 5 分钟，适合开发者；
+纯图形界面用户目前没有"双击安装"的路径（扩展不能自己装一个本地守护进程）。
+
+**支持 Chrome 吗？** 可以——MV3 扩展同一份代码，`chrome://extensions` 加载同一个目录即可。
+
+**会收集数据吗？** 不会。没有遥测、没有远程代码，唯一连接是回环 `ws://127.0.0.1:8787`。

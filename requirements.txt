@@ -1,0 +1,3 @@
+# XBBridge 唯一的运行时依赖：本地桥用的 WebSocket 实现
+# 安装：pip install -r requirements.txt
+websockets>=12.0

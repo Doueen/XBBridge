@@ -98,6 +98,16 @@ def daemon_alive() -> bool:
 def ensure_daemon(quiet: bool = False) -> None:
     if daemon_alive():
         return
+    # 新机器最常见的失败：没装 websockets，daemon 起来就退出，报错落在 .xb/server.log 里
+    # 而 CLI 只会说 "could not start bridge daemon"。先探一下，给出确切修法。
+    try:
+        import websockets  # noqa: F401
+    except ImportError:
+        raise XbFailure(
+            "bridge_unavailable",
+            "缺少 Python 依赖 websockets —— 先跑 `pip install websockets`（或 "
+            "`pip install -r requirements.txt`）再试",
+            retryable=False, cmd="daemon")
     os.makedirs(os.path.dirname(LOG), exist_ok=True)
     flags = 0
     if os.name == "nt":
