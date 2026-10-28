@@ -1,27 +1,62 @@
-# xb — 以 bsk 为标准的 Edge/Chromium 增强版
+# XBBridge — 让你的 AI agent 在自己的 Edge 标签里干活
 
-bsk（[Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)，MIT）的 CLI 命令面，加上 bsk 没有的东西：
-**标签组/分屏/休眠、被控标签的视觉标记、不抢前台、真实拖拽、批量动作、租约与代际校验**。
-扩展跑在你的真实 Edge 里（带登录态），本地守护进程做桥，命令行就是 `xb`。
+![XBBridge icon](extension/icons/icon-128.png)
+
+一个 MV3 扩展 + 本地桥 + 命令行（`xb`），让 agent 在**你正在用的那个窗口**里操作标签：
+按任务开命名标签组、给受控标签打可见标记、用租约防止多个 agent 抢同一个标签、后台截图不抢前台。
+
+命令名与 [bsk（Tencent/BrowserSkill，MIT）](https://github.com/Tencent/BrowserSkill) 对齐，
+所以针对 bsk 写的脚本可以直接换过来用；在此基础上补了 bsk 没有的能力（见下表）。
 
 - 浏览器侧：MV3 扩展（Edge 155 / Chromium 155 实测），`ws://127.0.0.1:8787`
 - 本机侧：`bridge/server.py`（WS ← 扩展，HTTP ← CLI），只依赖 `websockets`
-- 命令行：`xb.py`（命令名与 bsk 对齐，`--session` 接受但忽略）
+- 命令行：`xb.py`（`--session` 接受但忽略；多浏览器用 `--browser <实例|标签>`）
+- 数据没有任何一部分离开本机：唯一网络连接是回环 WebSocket，没有遥测、没有远程代码
+
+> **上架状态**：Microsoft Edge Add-ons 提交审核中（v0.3.4，In review）。
+> 商店版与本仓库的差别只有一处：`dev.reload`（让浏览器从磁盘重载扩展）在商店包里被编译关闭。
+
+## 快速开始
+
+```bash
+# 依赖：Python 3.9+、一条 websockets
+pip install websockets
+
+# 1) 加载扩展：edge://extensions → 开发人员模式 → 加载解压缩的扩展 → 选 本仓库/extension
+#    注意是 extension 这一层，不是仓库根目录（根目录有 __pycache__，Chromium 会拒绝加载）
+
+python xb.py status                       # 应显示 N browser(s) connected
+python xb.py open https://example.com --background --group-title demo --color blue
+python xb.py mark --tab <id> --label "抓数据"
+python xb.py panel                        # 谁在被控、租约还剩多久
+python xb.py close <id>
+```
+
+![control marker](docs/store/shot-1-marked-tab.png)
 
 ## 这一版比 bsk 多出来的东西
 
 | 能力 | 为什么重要 |
 |---|---|
-| **控制标记** `mark/unmark/marks` | 被 agent 接手的标签有呼吸绿边 + 左上角标签芯片 + favicon 换装。后台开标签组干活时，这是唯一能看见"它在动哪个标签"的手段 |
+| **控制标记** `mark/unmark/marks` | 被 agent 接手的标签有呼吸绿边 + 左下角标签芯片 + favicon 换装。后台开标签组干活时，这是唯一能看见"它在动哪个标签"的手段 |
 | **点击涟漪** `pulse` | click/fill/press/hover/select/upload/drag 会在落点闪一下，肉眼能跟上 agent 的动作 |
 | **不抢前台** | 默认 `--background` 开标签、截图不激活标签、`click --trusted` 只在窗口可用时用真实坐标，否则回落 DOM 点击而不是把窗口拽到前台 |
 | **真实拖拽** `drag` | 滑块、拖放控件、canvas 都能拖；起手点命中校验（`fromHit`） |
 | **真实点击** `click --trusted` | 先 `elementFromPoint` 验证那个点确实是目标，再派发 CDP 鼠标事件；点不上就回落，绝不"点到别的元素还报成功" |
+| **像人一样输入** `type` | CDP 真鼠标点击 + `Input.insertText`，并且能穿过 shadow DOM（企业 SPA 的表单只认这种输入） |
 | **批量动作** `batch` | 一个来回跑最多 100 步，逐步返回结果；失败时 `outcome=applied` + `details.results`，调用方不会盲目重试造成重复提交 |
 | **错误契约** | 每个失败带 `code / outcome / retryable`，CLI 映射成稳定退出码 |
 | **租约与代际** `claim/release/leases` | 一个客户端认领标签后，别人动它就报 `tab_not_owned`；页面导航后 `expectGeneration` 过期报 `stale_generation`，避免在没看过的文档上乱点 |
-| **工具栏面板** | 点扩展图标就能看到"现在有哪些标签被控制/被租用"，每行可一键切到前台或取消标记；命令行侧同一份数据用 `xb panel`（含 worker 重启次数与未捕获异常计数） |
+| **多浏览器** `browsers/use/label` | 日常 Edge 和一次性测试 profile 可以同时在线，`--browser` 精确指定；没指定又连了多个就报 `browser_required`，绝不瞎猜 |
+| **工具栏面板** | 点扩展图标就能看到"现在有哪些标签被控制/被租用"，每行可一键切到前台或取消标记；命令行侧同一份数据用 `xb panel` |
 | **全页/裁剪/元素截图** | `--full`、`--clip x,y,w,h`、`--selector`、`--format jpeg --quality`，长边默认截到 2000 CSS px，dpr 折算进 scale，出图尺寸可断言 |
+
+## 图标
+
+![icon set](test/icon-lab4/final-set.png)
+
+设计候选与取舍记录见 [test/icon-lab4/contact-sheet.png](test/icon-lab4/contact-sheet.png)；
+`python tools/icon_lab.py --install` 可重出全套尺寸。
 
 ## 安装（一次性）
 
@@ -257,3 +292,10 @@ python test/e2e.py           # 87 项断言，全部锚定 test/.instance 指定
   - 结构化抽取：`extract.rs`；iframe：`apps/extension/src/browser-driver/frame-graph.ts`（xb 目前只合并同源 frame，跨域仍走 allFrames 注入）
 - 可借鉴的商用实现清单（视觉标记、错误契约、租约、claim/generation、批量、drag、跨 iframe 坐标）：
   skill `browser-extension-agent-bridge` 的 `references/workbuddy-mechanisms.md`
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。
+
+CLI 的命令名与参数面参考了 [Tencent/BrowserSkill](https://github.com/Tencent/BrowserSkill)（MIT），
+实现与扩展代码为本仓库原创。

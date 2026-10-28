@@ -6,3 +6,5 @@ __pycache__/
 test/.instance
 dist/
 test/store-page.png
+test/icon-lab4/*-128.png
+test/icon-lab4/installed-preview.png
