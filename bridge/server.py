@@ -22,7 +22,13 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import logging
+
 from websockets.sync.server import serve
+
+# Raw TCP probes and rejected handshakes are library-level chatter; keep them out
+# of .xb/server.log so `xb logs`/`xb diag` stay readable.
+logging.getLogger("websockets").setLevel(logging.CRITICAL)
 
 WS_PORT = int(os.environ.get("XB_WS_PORT", "8787"))
 HTTP_PORT = int(os.environ.get("XB_HTTP_PORT", "8788"))
@@ -90,9 +96,18 @@ def _describe(instance_id: str, entry: dict) -> dict:
         "version": info.get("version") or "",
         "browser": info.get("browserName") or "",
         "userAgent": (info.get("browser") or "")[:160],
+        "extensionId": _extension_id(entry.get("origin") or ""),
         "connectedAt": entry.get("since"),
         "connectedFor": round(time.time() - (entry.get("since") or time.time()), 1),
     }
+
+
+def _extension_id(origin: str) -> str:
+    """chrome-extension://<id>/ -> <id> (empty for anything else)."""
+    prefix = "chrome-extension://"
+    if not origin.startswith(prefix):
+        return ""
+    return origin[len(prefix):].strip("/")
 
 
 def instances() -> list[dict]:
@@ -266,6 +281,8 @@ def ws_handler(conn) -> None:
                         "info": hello,
                         "since": old.get("since") or time.time(),
                         "seq": SEQ,
+                        # chrome-extension://<id>/ — the native host needs this id
+                        "origin": origin,
                     }
                 label = hello.get("label")
                 log(f"browser connected: {instance}"

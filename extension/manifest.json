@@ -21,7 +21,8 @@
     "alarms",
     "storage",
     "sessions",
-    "downloads"
+    "downloads",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "<all_urls>"

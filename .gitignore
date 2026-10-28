@@ -1,6 +1,9 @@
 .xb/
+build/
 test/dl/
 test/shot.png
+test/shot-*.png
+test/har-check.json
 __pycache__/
 *.pyc
 test/.instance

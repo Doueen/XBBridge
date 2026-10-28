@@ -23,9 +23,17 @@ import urllib.request
 WS_PORT = int(os.environ.get("XB_WS_PORT", "8787"))
 HTTP_PORT = int(os.environ.get("XB_HTTP_PORT", "8788"))
 BASE = f"http://127.0.0.1:{HTTP_PORT}"
-HERE = os.path.dirname(os.path.abspath(__file__))
+# When frozen by PyInstaller the code lives in a temp _MEIPASS dir while the
+# per-user state must survive: resources come from _MEIPASS, state from
+# %LOCALAPPDATA%\XBBridge.
+FROZEN = bool(getattr(sys, "frozen", False))
+HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+if FROZEN:
+    STATE_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "XBBridge")
+else:
+    STATE_DIR = os.path.join(HERE, ".xb")
 SERVER = os.path.join(HERE, "bridge", "server.py")
-LOG = os.path.join(HERE, ".xb", "server.log")
+LOG = os.path.join(STATE_DIR, "server.log")
 COLORS = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan"]
 JSON_MODE = False
 BROWSER: str | None = None      # resolved target browser (id or label), set in main()
@@ -96,6 +104,68 @@ def daemon_alive() -> bool:
         return False
 
 
+def do_diag(args) -> int:
+    """Collect everything a bug report needs into one zip.
+
+    A support round trip otherwise costs four messages ("what does xb status
+    say", "what is in the daemon log", "which extension build", "what were the
+    last faults"). This writes them all, with secrets dropped.
+    """
+    import platform
+    import zipfile
+    from datetime import datetime
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out = args.out or os.path.join(STATE_DIR, f"xb-diag-{stamp}.zip")
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    files: dict[str, str] = {}
+
+    env = {
+        "xb": {"frozen": FROZEN, "argv0": sys.argv[0], "state_dir": STATE_DIR},
+        "python": sys.version,
+        "platform": platform.platform(),
+        "ws_port": WS_PORT,
+        "http_port": HTTP_PORT,
+        "default_browser": load_default_browser(),
+        "session": os.environ.get("XB_BROWSER"),
+    }
+    files["env.json"] = json.dumps(env, ensure_ascii=False, indent=2)
+
+    def capture(name: str, fn) -> None:
+        try:
+            value = fn()
+            files[name] = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        except XbFailure as exc:
+            files[name] = json.dumps({"error": exc.payload() if hasattr(exc, "payload") else str(exc)},
+                                     ensure_ascii=False, indent=2)
+        except Exception as exc:
+            files[name] = json.dumps({"error": repr(exc)}, ensure_ascii=False, indent=2)
+
+    capture("status.json", lambda: http("/health", None, timeout=5) if daemon_alive() else {"daemon": "down"})
+    capture("browsers.json", lambda: rpc("browser.list", {}))
+    capture("panel.json", lambda: rpc("panel.state", {}))
+    capture("tabs.json", lambda: rpc("tab.list", {})[:40])
+    if args.tab:
+        capture("network.json", lambda: rpc("network.read", {"tabId": args.tab, "limit": 40}))
+        capture("console.json", lambda: rpc("console.read", {"tabId": args.tab, "limit": 40}))
+    if os.path.exists(LOG):
+        with open(LOG, "rb") as fh:
+            fh.seek(max(0, os.path.getsize(LOG) - 60000))
+            files["server.log"] = fh.read().decode("utf-8", "replace")
+    man_path = os.path.join(HERE, "extension", "manifest.json")
+    if os.path.exists(man_path):
+        with open(man_path, encoding="utf-8") as fh:
+            files["manifest.json"] = fh.read()
+
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, text in files.items():
+            z.writestr(name, text)
+    print(f"bundle: {out}  ({len(files)} file(s), {os.path.getsize(out):,} B)")
+    for name in sorted(files):
+        print(f"  - {name}")
+    return 0
+
+
 def ensure_daemon(quiet: bool = False) -> None:
     if daemon_alive():
         return
@@ -113,8 +183,9 @@ def ensure_daemon(quiet: bool = False) -> None:
     flags = 0
     if os.name == "nt":
         flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    argv = [sys.executable, "serve"] if FROZEN else [sys.executable, SERVER]
     with open(LOG, "ab") as logf:
-        subprocess.Popen([sys.executable, SERVER], stdin=subprocess.DEVNULL,
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL,
                          stdout=logf, stderr=logf, creationflags=flags, close_fds=True)
     for _ in range(60):
         if daemon_alive():
@@ -193,7 +264,7 @@ def _host(url: str) -> str:
 
 # ------------------------------------------------------------- browser target
 def _default_browser_path() -> str:
-    return os.path.join(HERE, ".xb", "default-browser")
+    return os.path.join(STATE_DIR, "default-browser")
 
 
 def load_default_browser() -> str:
@@ -254,7 +325,7 @@ def _pick_browser(rows: list[dict], want: str) -> dict:
 
 # ------------------------------------------------------------------- leases
 def _lease_path() -> str:
-    return os.path.join(HERE, ".xb", "leases.json")
+    return os.path.join(STATE_DIR, "leases.json")
 
 
 def load_leases() -> dict:
@@ -410,9 +481,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     tgt = argparse.ArgumentParser(add_help=False)
     tgt.add_argument("target", nargs="?", help="ref (@e12) or css selector")
-    tgt.add_argument("--text", help="locate by visible text instead of a selector")
-    tgt.add_argument("--label", help="locate by aria-label / placeholder / name")
-    tgt.add_argument("--exact", action="store_true", help="require an exact text/label match")
+    # distinct dests: `fill`/`type` already have a positional called `text`
+    tgt.add_argument("--text", dest="locate_text", help="locate by visible text instead of a selector")
+    tgt.add_argument("--label", dest="locate_label", help="locate by aria-label / placeholder / name")
+    tgt.add_argument("--exact", dest="locate_exact", action="store_true",
+                     help="require an exact text/label match")
     tgt.add_argument("--tab", type=int)
     tgt.add_argument("--no-mark", action="store_true", dest="no_mark",
                      help="don't paint the control marker on this tab")
@@ -422,6 +495,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status")
     sub.add_parser("pause", help="stop the agent from touching any tab (toolbar panel also has this)")
     sub.add_parser("resume", help="undo xb pause")
+    sub.add_parser("host-wake", help="ask the browser to start the bridge via native messaging")
+    sub.add_parser("native-host", help="run the native messaging host on stdio (used by Edge)")
+    hp = sub.add_parser("host", help="install/inspect the native messaging host")
+    hp.add_argument("action", nargs="?", default="status",
+                    choices=["status", "install", "uninstall"])
+    hp.add_argument("--extension-id", nargs="+")
     sub.add_parser("blocked", help="list host patterns the agent must never touch")
     bl = sub.add_parser("block", help="never touch this site again"); bl.add_argument("pattern")
     ub = sub.add_parser("unblock", help="remove a blocked pattern"); ub.add_argument("pattern")
@@ -431,6 +510,9 @@ def build_parser() -> argparse.ArgumentParser:
     lb = sub.add_parser("label", help="name the selected browser (then --browser <label> works)")
     lb.add_argument("text", nargs="?", default="")
     sub.add_parser("doctor")
+    dg = sub.add_parser("diag", help="collect a support bundle (versions, state, logs) into a zip")
+    dg.add_argument("--out", help="zip path (default: .xb/xb-diag-<timestamp>.zip)")
+    dg.add_argument("--tab", type=int)
     sub.add_parser("apis")
     sub.add_parser("serve")
     sub.add_parser("stop")
@@ -609,6 +691,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    if FROZEN:     # the frozen console defaults to the OEM codepage; keep UTF-8
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
     global JSON_MODE, BROWSER
     args = build_parser().parse_args(argv)
     j = args.json
@@ -618,11 +706,11 @@ def main(argv=None) -> int:
 
     # --text / --label: resolve to a real selector first, then every element command
     # behaves exactly as if it had been given that selector.
-    wants_locate = bool(getattr(args, "text", None) or getattr(args, "label", None))
+    wants_locate = bool(getattr(args, "locate_text", None) or getattr(args, "locate_label", None))
     if wants_locate and not (getattr(args, "target", "") or "").startswith("@"):
-        loc = rpc("locate", {"tabId": tab, "text": getattr(args, "text", None),
-                             "label": getattr(args, "label", None),
-                             "exact": True if getattr(args, "exact", False) else None})
+        loc = rpc("locate", {"tabId": tab, "text": getattr(args, "locate_text", None),
+                             "label": getattr(args, "locate_label", None),
+                             "exact": True if getattr(args, "locate_exact", False) else None})
         args.target = loc["selector"]
         if not JSON_MODE:
             print(f"(located {loc.get('name')!r} -> {loc['selector']}, {loc.get('candidates')} candidate(s))",
@@ -671,6 +759,29 @@ def main(argv=None) -> int:
                                     + (f"'{rr['label']}'" if rr["label"] else "(cleared)")))
         return 0
 
+    if args.cmd == "native-host":
+        import runpy
+        runpy.run_path(os.path.join(HERE, "bridge", "native_host.py"), run_name="__main__")
+        return 0
+
+    if args.cmd == "host-wake":
+        r = rpc("host.wake", {}, timeout=30)
+        emit(r, j, lambda rr: print(
+            ("bridge up: spawned=" + str(rr.get("spawned")) + f" ws:{rr.get('wsPort')} http:{rr.get('httpPort')}")
+            if rr.get("ok") else f"native host unavailable: {rr.get('error')}"))
+        return 0 if r.get("ok") else 3
+
+    if args.cmd == "host":
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "install_native_host.py")
+        argv = [sys.executable, script, "--status" if args.action == "status" else
+                ("--uninstall" if args.action == "uninstall" else "--install")]
+        if args.extension_id:
+            argv += ["--extension-id", *args.extension_id]
+        return subprocess.call(argv)
+
+    if args.cmd == "diag":
+        return do_diag(args)
+
     if args.cmd in ("pause", "resume", "blocked", "block", "unblock"):
         if args.cmd in ("pause", "resume"):
             r = rpc(args.cmd, {})
@@ -714,8 +825,13 @@ def main(argv=None) -> int:
             print(f"daemon      : pid {d['pid']}  http {d['http']}  ws :{d['ws_port']}")
             if not e["connected"]:
                 print("extension   : NOT connected")
-                print("\n-> load the extension: edge://extensions -> 开发人员模式 -> 加载解压缩的扩展 -> "
-                      f"{os.path.join(HERE, 'extension')}")
+                if FROZEN:
+                    print("\n-> the browser extension is not talking to this bridge yet."
+                          "\n   install XBBridge from the Edge Add-ons store (or load extension/ from the"
+                          "\n   repository in developer mode), then open its toolbar panel once.")
+                else:
+                    print("\n-> load the extension: edge://extensions -> 开发人员模式 -> 加载解压缩的扩展 -> "
+                          f"{os.path.join(HERE, 'extension')}")
                 return
             print(f"extension   : {e['count']} browser(s) connected")
             default = o["default"]
@@ -736,6 +852,11 @@ def main(argv=None) -> int:
 
     if args.cmd == "serve":
         os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        if FROZEN:
+            # the exe cannot re-exec a .py file; run the bundled daemon in-process
+            import runpy
+            runpy.run_path(SERVER, run_name="__main__")
+            return 0
         return subprocess.call([sys.executable, SERVER])
     if args.cmd == "stop":
         try:
@@ -1006,7 +1127,11 @@ def main(argv=None) -> int:
             with open(args.har, "w", encoding="utf-8") as f:
                 json.dump(har, f, ensure_ascii=False, indent=2)
             entries = (har.get("log") or {}).get("entries") or []
-            print(f"{len(entries)} entries -> {args.har}")
+            if j:
+                print(json.dumps({"har": args.har, "entries": len(entries),
+                                  "bytes": os.path.getsize(args.har)}, ensure_ascii=False))
+            else:
+                print(f"{len(entries)} entries -> {args.har}")
             return 0
         if args.wait_pattern:
             since = args.since
@@ -1023,13 +1148,15 @@ def main(argv=None) -> int:
                                      "method": args.method, "sinceMs": since,
                                      "timeoutMs": int(args.timeout * 1000)},
                     timeout=args.timeout + 15)
-            emit(r, j, lambda rr: print(
-                f"{'matched' if rr.get('matched') else 'TIMEOUT'} after {rr.get('waitedMs')}ms: "
-                + (f"[{rr['index']}] {rr['entry']['method']} {rr['entry']['status']} {rr['entry']['url'][:110]}"
-                   if rr.get("matched") else f"{rr.get('buffered')} buffered")))
             if not r.get("matched"):
+                # a miss is an error, not a result: keep stdout a single document
+                if not j:
+                    print(f"TIMEOUT after {r.get('waitedMs')}ms — {r.get('buffered')} request(s) buffered")
                 raise XbFailure("timeout", f"no request matched {args.wait_pattern!r} within {args.timeout:g}s",
                                 retryable=True, cmd="network")
+            emit(r, j, lambda rr: print(
+                f"matched after {rr.get('waitedMs')}ms: [{rr['index']}] "
+                f"{rr['entry']['method']} {rr['entry']['status']} {rr['entry']['url'][:110]}"))
             return 0
         if args.body is not None:
             r = rpc("network.body", {"tabId": tab, "index": args.body}, timeout=60)

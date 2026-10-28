@@ -42,6 +42,7 @@
 | `storage` | Store the local instance id, the tab-mark table and lease tokens. Local only, never uploaded. |
 | `sessions` | `sessions.recent` — list recently closed tabs, only when the user asks for it. |
 | `downloads` | `download` — save a file the user asked to download into a directory they named. |
+| `nativeMessaging` | **Optional.** Talks to a helper the user registers themselves (`xb host install`) so the local bridge starts together with the browser instead of waiting for the first `xb` command. Only localhost <-> local process; if the helper is absent the extension does nothing and still works. |
 | `host_permissions: <all_urls>` | The user chooses which page the agent works on at run time, so the domain set cannot be declared in advance. Nothing is read until the user issues a command for that tab. |
 
 ### Remote code
@@ -175,6 +176,7 @@ Where each permission is used:
 - storage: local instance id, tab-mark table, lease tokens (never uploaded)
 - sessions: sessions.recent, only when the user runs it
 - downloads: the download command only
+- nativeMessaging: only after the user runs "xb host install"; used once per browser start to ask a local helper to start the bridge daemon on 127.0.0.1. No data is sent to it beyond {"type":"ensure"}, and nothing leaves the machine. Uninstalling the helper or never installing it leaves the extension fully functional
 - debugger: only by "click --trusted", to dispatch real mouse events on pages that ignore synthetic ones; no page data is read through it
 - host <all_urls>: the user picks the page at run time; nothing is read until a command targets that tab
 

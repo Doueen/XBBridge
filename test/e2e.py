@@ -192,8 +192,9 @@ def main() -> int:
 
     print("== network: wait / replay / har ==")
     n_before = len(xb("network", "--tab", lt).get("requests") or [])
-    xb("click", "--text", "调用接口 data.json", "--tab", lt)
-    hit = xb("network", "--wait-pattern", "data.json", "--tab", lt, "--timeout", "8")
+    # capture must be armed BEFORE the click, otherwise Network.enable starts
+    # recording after the request already happened
+    hit = xb("network", "--wait-pattern", "data.json", "--click", "#api", "--tab", lt, "--timeout", "10")
     check("network --wait-pattern catches the request", hit.get("matched") is True,
           f"index {hit.get('index')} after {hit.get('waitedMs')}ms")
     if hit.get("matched"):

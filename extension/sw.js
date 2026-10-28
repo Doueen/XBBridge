@@ -258,6 +258,39 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes[BLOCK_KEY]) BLOCKED = (changes[BLOCK_KEY].newValue || []).map(String);
 });
 
+/* ---- optional native messaging host --------------------------------------
+ * Edge cannot start a local process, so without this the bridge only comes up
+ * after the first `xb` command. When tools/install_native_host.py has been
+ * run, the service worker asks the host to start the daemon at browser start.
+ * Everything here degrades to a no-op when the host is not installed.
+ */
+const NATIVE_HOST = 'com.doueen.xbbridge';
+let nativeHostState = { supported: typeof chrome.runtime.sendNativeMessage === 'function', last: null };
+
+function wakeBridge() {
+  return new Promise((resolve) => {
+    if (typeof chrome.runtime.sendNativeMessage !== 'function') { resolve(null); return; }
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      nativeHostState = { supported: true, last: value };
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish({ ok: false, error: 'host timed out' }), 8000);
+    try {
+      chrome.runtime.sendNativeMessage(NATIVE_HOST, { type: 'ensure' }, (res) => {
+        const err = chrome.runtime.lastError;    // absent host lands here, not in a throw
+        if (err) finish({ ok: false, error: err.message || String(err) });
+        else finish(res || { ok: false, error: 'empty reply' });
+      });
+    } catch (e) {
+      finish({ ok: false, error: String((e && e.message) || e) });
+    }
+  });
+}
+
 async function handle(msg) {
   stats.cmds += 1;
   stats.lastCmdAt = Date.now();
@@ -2595,6 +2628,10 @@ const COMMANDS = {
     return { blocked: BLOCKED.slice(), removed: raw };
   },
 
+  async 'host.wake'() { return { ...(await wakeBridge()), state: nativeHostState }; },
+
+  async 'host.state'() { return { ...nativeHostState, connected: !!socket, wsPort: WS_PORT }; },
+
   async 'panel.state'() { return await panelState(); },
 
   /* name this browser so --browser <label> works without remembering the id */
@@ -3125,8 +3162,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true;   // keep the channel open for the async reply
 });
 
-chrome.runtime.onInstalled.addListener(() => { connect(); });
-chrome.runtime.onStartup.addListener(() => { connect(); });
+chrome.runtime.onInstalled.addListener(() => { wakeBridge().finally(() => connect()); });
+chrome.runtime.onStartup.addListener(() => { wakeBridge().finally(() => connect()); });
 chrome.action.onClicked.addListener(() => { backoff = RECONNECT_MIN; connect(); });
 
 /* a mark dies with its tab, and an overlay dies with its document: repaint */
