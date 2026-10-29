@@ -260,6 +260,7 @@ edge-agent/
   test/launch.py            起一个干净的测试 profile，并把它的实例 id 写进 test/.instance
   test/e2e.py               85 项端到端断言（全部锚定 test/.instance 指定的浏览器）
   test/kill-edge.ps1        只杀带指定 profile 标记的 msedge
+  test/panel.py             浏览器无关的面板渲染检查（node + 假 chrome/假 DOM，e2e 覆盖不到 popup）
 ```
 
 ## 自测
@@ -314,6 +315,7 @@ xb host install --extension-id <扩展 id>   # 可选：让 Edge 启动时自动
 
 ```bash
 python test/offline.py               # 起真守护进程 + 假扩展，16 项：注册表/错误映射/Origin 策略/宿主分帧
+python test/panel.py                 # 面板渲染，12 项：把 panel.state 喂给真 popup.js，断言显示内容
 ```
 
 这条不碰浏览器，适合放进任何 CI；`test/e2e.py` 才是需要真 Edge 的那套。

@@ -27,6 +27,8 @@ jobs:
         run: |
           node --check extension/sw.js
           node --check extension/popup.js
+      - name: panel render (stub chrome + DOM)
+        run: python test/panel.py
       - name: validate + package the store build
         run: python tools/build_store.py
       - uses: actions/upload-artifact@v4
