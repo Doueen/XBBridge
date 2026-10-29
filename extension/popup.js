@@ -114,7 +114,8 @@ function render(state) {
   ver.textContent = state.label ? `${state.label} · v${state.version}` : `v${state.version}`;
   ver.title = `instance ${state.instanceId || '?'} — xb --browser 可用这个 id 或上面的名字`;
   dot.classList.toggle('on', !!state.connected);
-  const t = state.totals || {};
+  /* NOTE: no local named `t` here — it shadows the i18n helper above and
+   * turns every label into "t is not a function". */
   const counts = state.totals || {};
   totals.textContent = state.connected
     ? t('connected', state.wsPort, counts.tabs ?? 0, counts.marked ?? 0, counts.leased ?? 0)
