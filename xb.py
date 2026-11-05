@@ -38,6 +38,41 @@ COLORS = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan"]
 JSON_MODE = False
 BROWSER: str | None = None      # resolved target browser (id or label), set in main()
 
+
+def hidden_console_kwargs() -> dict:
+    """``subprocess`` kwargs keeping a console child invisible when we have no console.
+
+    A console-less parent (desktop app, Edge native host, agent background
+    runner) that spawns a console program without a creation flag hands console
+    creation to the OS, and Windows 11's default terminal (Windows Terminal)
+    answers with a **visible empty window** that lives as long as the child —
+    the "empty command line window" users see next to the bridge.  With
+    CREATE_NO_WINDOW the child still gets a private console, but no window.
+
+    When we *are* attached to a real console (the normal `xb serve` debugging
+    case) we return nothing so the output keeps landing in that terminal.
+    """
+    if os.name != "nt":
+        return {}
+    try:
+        import ctypes
+        attached = ctypes.windll.kernel32.GetConsoleWindow()
+    except Exception:                                   # pragma: no cover - env specific
+        attached = 0
+    # A real terminal (even when hosted by ConPTY, where GetConsoleWindow can be
+    # null) still has a tty on stdout — keep that case visible.
+    if attached or _stdout_is_tty():
+        return {}
+    return {"creationflags": 0x08000000}               # CREATE_NO_WINDOW
+
+
+def _stdout_is_tty() -> bool:
+    try:
+        return bool(sys.stdout and sys.stdout.isatty())
+    except Exception:                                   # pragma: no cover - env specific
+        return False
+
+
 # exit codes: stable per failure class so scripts can branch without parsing
 EXIT_BY_CODE = {
     "invalid_params": 2, "unsupported_method": 2,
@@ -180,9 +215,11 @@ def ensure_daemon(quiet: bool = False) -> None:
             "`pip install -r requirements.txt`）再试",
             retryable=False, cmd="daemon")
     os.makedirs(os.path.dirname(LOG), exist_ok=True)
-    flags = 0
-    if os.name == "nt":
-        flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    # Windows: CREATE_NO_WINDOW, not DETACHED_PROCESS. DETACHED leaves the
+    # console-less child to allocate a console on its own, and Windows 11 hands
+    # that creation to Windows Terminal — one empty terminal window per daemon
+    # start (the venv python.exe trampoline re-execs and triggers it every time).
+    flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
     argv = [sys.executable, "serve"] if FROZEN else [sys.executable, SERVER]
     with open(LOG, "ab") as logf:
         subprocess.Popen(argv, stdin=subprocess.DEVNULL,
@@ -777,7 +814,7 @@ def main(argv=None) -> int:
                 ("--uninstall" if args.action == "uninstall" else "--install")]
         if args.extension_id:
             argv += ["--extension-id", *args.extension_id]
-        return subprocess.call(argv)
+        return subprocess.call(argv, **hidden_console_kwargs())
 
     if args.cmd == "diag":
         return do_diag(args)
@@ -857,7 +894,7 @@ def main(argv=None) -> int:
             import runpy
             runpy.run_path(SERVER, run_name="__main__")
             return 0
-        return subprocess.call([sys.executable, SERVER])
+        return subprocess.call([sys.executable, SERVER], **hidden_console_kwargs())
     if args.cmd == "stop":
         try:
             http("/shutdown", {}, timeout=3)

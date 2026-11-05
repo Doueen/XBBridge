@@ -106,9 +106,10 @@ def ensure_bridge() -> dict:
     if cmd[0].endswith("xb.exe"):
         cmd = cmd + ["serve"]
     log(f"spawning: {cmd}")
-    creation = 0
-    if os.name == "nt":
-        creation = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    # CREATE_NO_WINDOW, not DETACHED_PROCESS: a DETACHED console child allocates
+    # its own console, and Windows 11 hands that to Windows Terminal — one empty
+    # terminal window per bridge start (Edge starts us from a console-less host).
+    creation = 0x08000000 if os.name == "nt" else 0
     try:
         subprocess.Popen(
             cmd,
